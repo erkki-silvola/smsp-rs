@@ -1,0 +1,22 @@
+[package]
+name = "smsp-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Erkki Silvola"]
+description = "Simple Message Streaming Protocol for IoT devices"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/erkki-silvola/smsp-rs"
+keywords = ["iot", "protocol", "streaming", "embedded"]
+categories = ["network-programming", "embedded"]
+
+[dependencies]
+thiserror = "1.0"
+bytes = "1.5"
+
+[dev-dependencies]
+# For testing
+
+[features]
+default = ["tcp"]
+tcp = []
+serial = []
