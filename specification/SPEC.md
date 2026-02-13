@@ -41,12 +41,12 @@ Bytes 3+: Payload data
 1. Connection initiator becomes the **master** (can only send requests)
 2. Connection receiver becomes the **slave** (can only respond to requests)
 3. Master sends initialization request: `"parameters?\0"`
-4. Slave responds within 5 seconds with parameters
+4. Slave shall responds within 5 seconds with parameters
 
 ### Parameter Format
 
 ```
-"<version>,<length_present>,<timeout_ms>,<fragment_count>,<fragment_max_size>\n"
+"<version>,<length_present>,<timeout_ms>,<fragment_count>,<fragment_max_size if length not present shall be 0>\n"
 ```
 
 **Example:**
@@ -147,7 +147,7 @@ Fragment 3: status=LAST(00), seq=2, length=128, payload=[128 bytes]
 ```
 ACK Responses:
 ```
-ACK: status=LAST(00), seq=0, length=0, payload=[]
+ACK: status=ACK(00), seq=0, length=0, payload=[]
 ```
 
 ### Example 2: Slave Responds with Error
@@ -172,19 +172,11 @@ ACK: status=LAST(00), seq=0, length=0, payload=[]
           │  [MORE, seq=0, len=256, payload]                 │
           │ ─────────────────────────────────────────────────>│
           │                                                   │
-          │          [CANCEL, seq=0, len=10, "error msg"]    │
+          │          [CANCEL, seq=0, len=N, [..]]    │
           │<───────────────────────────────────────────────── │
           │                                                   │
           │              ⚠ ERROR - Operation Cancelled       │
           │                                                   │
-```
-
-**Cancel Message:**
-```
-status    = CANCEL(10)
-seq       = 0
-length    = 10
-payload   = "error msg"
 ```
 
 ### Example 3: Slave Accepts Multiple Fragments Before ACK
@@ -219,7 +211,7 @@ payload   = "error msg"
           │<───────────────────────────────────────────────── │
           │            (ACK after 2 fragments)                │
           │                                                   │
-          │  [LAST, seq=2, len=128, payload]                 │
+          │  [MORE, seq=2, len=128, payload]                 │
           │ ─────────────────────────────────────────────────>│
           │                                                   │
           │                  [ACK, seq=0, len=0]             │
@@ -230,7 +222,6 @@ payload   = "error msg"
 
 **Key Points:**
 - Slave waits for `fragment_count` fragments before sending ACK
-- LAST fragment always triggers immediate ACK regardless of count
 - Reduces ACK overhead on reliable networks
 
 ## Sequence Number Behavior
@@ -249,7 +240,7 @@ payload   = "error msg"
 
 | Status | Code | Usage | Description |
 |--------|------|-------|-------------|
-| `LAST` | `00` | End of transmission | Final fragment or single message |
+| `LAST` | `00` | End of transmission | Final fragment of request or response |
 | `MORE` | `01` | Continuation | More fragments follow |
 
 ### Control Messages
@@ -270,7 +261,6 @@ payload   = "error msg"
 
 1. **fragment_count = 1**: ACK after every fragment
 2. **fragment_count = N**: ACK after every N fragments
-3. **LAST fragment**: Always triggers immediate ACK
 
 ### Example Flow Control (fragment_count=3)
 
@@ -282,6 +272,12 @@ Fragment 4 (MORE) ─────> (no ACK)
 Fragment 5 (MORE) ─────> (no ACK)
 Fragment 6 (LAST) ─────> [no ACK]
 **** Roles Switched ****
+Fragment 1 (no ACK) <───── (MORE)
+Fragment 2 (no ACK) <───── (MORE)
+Fragment 3 (ACK) <───── [MORE] <─── 3 fragments received
+Fragment 4 (no ACK) <───── (MORE)
+Fragment 5 (no ACK) <───── (MORE)
+Fragment 6 (no ACK) <───── [LAST]
 ...
 ```
 
@@ -289,37 +285,30 @@ Fragment 6 (LAST) ─────> [no ACK]
 
 ### Initialization Timeout
 - Slave must respond to `"parameters?\0"` within **5 seconds**
-- If timeout occurs, connection fails
+- If timeout occurs, connection shall be terminated by the master.
 
 ### Operation Timeout
 - Configured in slave's parameter response
-- Default: 20000ms (20 seconds)
-- Applies to fragment reception and ACK waiting
+- Applies to response reception and ACK waiting
 
 ### Timeout Behavior
-- Master times out waiting for ACK
-- Slave times out waiting for next fragment
-- Timeout triggers connection error and cleanup
+- Master times out waiting for ACK. Connection shall be terminated.
 
 ## Error Handling
 
 ### Cancel/Error Conditions
 
 Master can send CANCEL when:
-- Sequence number mismatch detected
-- Invalid data received
-- Internal error occurs
+- Long transmission needs to be stopped.
+- Sequence number mismatch
 
 Slave can send CANCEL when:
-- Request validation fails
+- Internal error occurs.
+- Not enough resources to process the request.
 - Sequence number mismatch
-- Resource exhaustion
-- Protocol violation
 
 ### Error Payload
-- Payload contains human-readable error reason
-- Maximum length determined by fragment_max_size
-- UTF-8 encoded string recommended
+- Payload contains application layer agreed protocol.
 
 ## Implementation Notes
 
@@ -359,7 +348,6 @@ Uninitialized ──[accept]──> Negotiating ──[params sent]──> Ready
 
 ### For IoT Devices (Slave)
 - Use small fragment_max_size (256-512 bytes) to fit in RAM
-- Set fragment_count based on reliability (1 for unreliable, 2+ for reliable)
 - Set reasonable timeout (20-30 seconds for iot device to be able to process request or  fragment)
 
 ### For Clients (Master)
@@ -369,8 +357,6 @@ Uninitialized ──[accept]──> Negotiating ──[params sent]──> Ready
 ### Performance Optimization
 - Increase fragment_count on reliable networks
 - Increase fragment_max_size for throughput
-- Decrease timeout for fast error detection
-- Disable length_present on byte-stream transports if not needed
 
 ## Security Considerations
 
