@@ -82,6 +82,12 @@ impl Parameters {
             ));
         }
 
+        if length_present && fragment_count != 1 {
+            return Err(Error::InvalidParameters(
+                "When length_present is true, fragment_count must be 1".to_string(),
+            ));
+        }
+
         Ok(Parameters {
             protocol_version,
             length_present,
@@ -143,16 +149,14 @@ mod tests {
 
     #[test]
     fn test_invalid_parameters() {
-        // Wrong number of fields
         assert!(Parameters::from_response("1,1,20000").is_err());
 
-        // Invalid boolean
         assert!(Parameters::from_response("1,2,20000,1,256\n").is_err());
 
-        // Fragment count zero
         assert!(Parameters::from_response("1,1,20000,0,256\n").is_err());
 
-        // Fragment size zero
         assert!(Parameters::from_response("1,1,20000,1,0\n").is_err());
+
+        assert!(Parameters::from_response("1,1,20000,2,256\n").is_err());
     }
 }

@@ -1,0 +1,77 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+*.md
+Cargo.lock
+
+# Cargo lock file (uncomment for applications, keep commented for libraries)
+# Cargo.lock
+
+# Generated documentation
+/doc/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test artifacts
+*.profraw
+*.profdata
+
+# Backup files
+*.bak
+*.tmp
+*.temp
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Rust analyzer
+.rust-analyzer/
+
+# Debug files
+*.dSYM/
+
+# Flamegraph
+flamegraph.svg
+perf.data
+perf.data.old
+
+# Code coverage
+*.gcda
+*.gcno
+*.lcov
+coverage/
+tarpaulin-report.html
+
+# Benchmarking
+criterion/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Environment files (may contain secrets)
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+
+# Temporary test outputs
+/tmp/
+/temp/

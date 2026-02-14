@@ -59,6 +59,7 @@ Bytes 3+: Payload data
 - `length_present`: 0 or 1, indicates if length field is used
 - `timeout_ms`: Operation timeout in milliseconds
 - `fragment_count`: Number of fragments to send before waiting for ACK (1-MAX::u8)
+  - **IMPORTANT**: If `length_present=1`, then `fragment_count` MUST be 1
 - `fragment_max_size`: Maximum fragment size in bytes (1-MAX::u16)
 
 ## Roles
@@ -233,6 +234,7 @@ ACK: status=ACK(00), seq=0, length=0, payload=[]
 
 ### ACK Sequence
 - ACK messages use seq=0
+- ACK message may contain optionally payload
 
 ## Message Types
 
@@ -317,6 +319,9 @@ Slave can send CANCEL when:
 - Remains constant for connection lifetime
 - When false: payload length inferred from transport
 - When true: explicit 16-bit length field included
+- **IMPORTANT**: When `length_present=true`, `fragment_count` MUST be 1
+  - This simplifies flow control when length is explicitly known
+  - Every fragment is acknowledged immediately
 
 ### Reserved Bits
 - Must be set to 0 by sender

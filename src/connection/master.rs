@@ -1,36 +1,28 @@
 use crate::connection::state::ConnectionState;
 use crate::error::{Error, Result};
-use crate::protocol::{Message, Parameters, Status};
-use crate::session::{FlowControl, FragmentManager, SequenceTracker};
+use crate::protocol::{Header, Message, Parameters, Status};
+use crate::session::SequenceTracker;
 use crate::transport::Transport;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use std::time::Duration;
 
-/// Master/Host connection - initiates requests
 pub struct MasterConnection<T: Transport> {
     transport: T,
     state: ConnectionState,
     parameters: Option<Parameters>,
     sequence: SequenceTracker,
-    fragment_manager: Option<FragmentManager>,
-    flow_control: Option<FlowControl>,
 }
 
 impl<T: Transport> MasterConnection<T> {
-    /// Create a new master connection with a transport
     pub fn new(transport: T) -> Self {
         MasterConnection {
             transport,
             state: ConnectionState::Uninitialized,
             parameters: None,
             sequence: SequenceTracker::new(),
-            fragment_manager: None,
-            flow_control: None,
         }
     }
 
-    /// Initialize the connection by negotiating parameters
-    /// Returns the negotiated parameters
     pub fn initialize(&mut self) -> Result<Parameters> {
         if self.state != ConnectionState::Uninitialized {
             return Err(Error::InvalidState(format!(
@@ -41,28 +33,18 @@ impl<T: Transport> MasterConnection<T> {
 
         self.state = ConnectionState::Negotiating;
 
-        // Send parameter request
         self.transport.send(Parameters::INIT_REQUEST.as_bytes())?;
 
-        // Wait for response with timeout (5 seconds as per spec)
         let mut buf = [0u8; 256];
         let n = self
             .transport
             .receive_timeout(&mut buf, Duration::from_secs(5))?;
 
-        // Parse parameters
         let response = std::str::from_utf8(&buf[..n]).map_err(|_| {
             Error::InvalidParameters("Response is not valid UTF-8".to_string())
         })?;
 
         let parameters = Parameters::from_response(response)?;
-
-        // Initialize fragment manager and flow control
-        self.fragment_manager = Some(FragmentManager::new(parameters.fragment_max_size as usize));
-        self.flow_control = Some(FlowControl::new(
-            parameters.fragment_count,
-            parameters.timeout,
-        ));
 
         self.parameters = Some(parameters.clone());
         self.state = ConnectionState::Ready;
@@ -71,7 +53,6 @@ impl<T: Transport> MasterConnection<T> {
         Ok(parameters)
     }
 
-    /// Send a request and receive response
     pub fn request(&mut self, data: &[u8]) -> Result<Bytes> {
         if !self.state.can_transfer() {
             return Err(Error::InvalidState(format!(
@@ -80,141 +61,159 @@ impl<T: Transport> MasterConnection<T> {
             )));
         }
 
-        let params = self
+        let max_size = self
             .parameters
             .as_ref()
-            .ok_or_else(|| Error::InvalidState("Parameters not initialized".to_string()))?;
+            .ok_or_else(|| Error::InvalidState("Parameters not initialized".to_string()))?
+            .fragment_max_size as usize;
 
-        let fragment_manager = self.fragment_manager.as_ref().ok_or_else(|| {
-            Error::InvalidState("Fragment manager not initialized".to_string())
-        })?;
+        let mut offset = 0;
 
-        let flow_control = self.flow_control.as_mut().ok_or_else(|| {
-            Error::InvalidState("Flow control not initialized".to_string())
-        })?;
+        while offset < data.len() {
+            let end = (offset + max_size).min(data.len());
+            let fragment = &data[offset..end];
+            let is_last = end >= data.len();
 
-        // Split data into fragments
-        let fragments = fragment_manager.split(data);
-
-        // Send all fragments
-        for (i, fragment) in fragments.iter().enumerate() {
-            let is_last = i == fragments.len() - 1;
             let status = if is_last { Status::Last } else { Status::More };
-
             let seq = self.sequence.next_seq();
+
             let msg = Message::new(
-                crate::protocol::Header::new(
-                    status,
-                    params.length_present,
-                    seq,
-                    if params.length_present {
-                        Some(fragment.len() as u16)
-                    } else {
-                        None
-                    },
-                )?,
-                fragment.clone(),
+                Header::new(status, true, seq, Some(fragment.len() as u16))?,
+                Bytes::copy_from_slice(fragment),
             )?;
 
-            // Send fragment
             self.transport.send(&msg.to_bytes())?;
 
-            // Increment pending count
-            flow_control.increment_pending();
-
-            // Wait for ACK if needed (but not after last fragment with fragment_count=1)
-            if flow_control.should_wait_for_ack() && !(is_last && params.fragment_count == 1) {
-                flow_control.wait_for_ack(&mut self.transport, params.length_present)?;
+            if !is_last {
+                self.read_ack()?;
             }
+
+            offset = end;
         }
 
-        // Now receive the response
         self.receive_response()
     }
 
-    /// Receive a response from the slave
     fn receive_response(&mut self) -> Result<Bytes> {
-        let params = self
-            .parameters
-            .as_ref()
-            .ok_or_else(|| Error::InvalidState("Parameters not initialized".to_string()))?;
+        if self.parameters.is_none() {
+            return Err(Error::InvalidState("Parameters not initialized".to_string()));
+        }
 
-        let fragment_manager = self.fragment_manager.as_mut().ok_or_else(|| {
-            Error::InvalidState("Fragment manager not initialized".to_string())
-        })?;
-
-        let flow_control = self.flow_control.as_mut().ok_or_else(|| {
-            Error::InvalidState("Flow control not initialized".to_string())
-        })?;
-
-        // Clear previous assembly
-        fragment_manager.clear();
-
-        // Receive response sequence tracker
         let mut response_seq = SequenceTracker::new();
+        let mut response = BytesMut::new();
 
         loop {
-            // Receive message
-            let mut buf = [0u8; 4096];
-            let n = self
-                .transport
-                .receive_timeout(&mut buf, params.timeout)?;
+            let msg = self.read_message()?;
 
-            let (msg, _) = Message::from_bytes(&buf[..n])?;
-
-            // Check for cancel
             if msg.is_cancel() {
                 let reason = String::from_utf8_lossy(&msg.payload);
-                fragment_manager.clear();
                 return Err(Error::Cancelled(reason.to_string()));
             }
 
-            // Validate sequence
             if !response_seq.validate_and_advance(msg.header.seq) {
-                // Send cancel and return error
-                flow_control.send_cancel(
-                    &mut self.transport,
-                    msg.header.seq,
-                    params.length_present,
-                    "Sequence error",
-                )?;
-                fragment_manager.clear();
                 return Err(Error::Sequence {
                     expected: response_seq.current(),
                     actual: msg.header.seq,
                 });
             }
 
-            // Check if this was the last fragment before moving payload
+            let msg_seq = msg.header.seq;
             let is_last = msg.is_last();
+            response.extend_from_slice(&msg.payload);
 
-            // Add fragment
-            fragment_manager.add_fragment(msg.payload)?;
-
-            // Send ACK
-            flow_control.send_ack(&mut self.transport, msg.header.seq, params.length_present)?;
-
-            // Check if this was the last fragment
             if is_last {
-                break;
+                return Ok(response.freeze());
+            }
+
+            self.send_ack(msg_seq)?;
+        }
+    }
+
+    fn read_message(&mut self) -> Result<Message> {
+        let timeout = self
+            .parameters
+            .as_ref()
+            .ok_or_else(|| Error::InvalidState("Parameters not initialized".to_string()))?
+            .timeout;
+
+        let mut buf = [0u8; 1];
+        let n = self
+            .transport
+            .receive_timeout(&mut buf, timeout)?;
+
+        if n != 1 {
+            return Err(Error::Protocol("Failed to read header byte".to_string()));
+        }
+
+        let header = Header::from_bytes(&buf)?;
+
+        if !header.length_present {
+            return Err(Error::Protocol(
+                "Protocol version without length not supported".to_string(),
+            ));
+        }
+
+        let mut len_buf = [0u8; 2];
+        let n = self
+            .transport
+            .receive_timeout(&mut len_buf, timeout)?;
+
+        if n != 2 {
+            return Err(Error::Protocol("Failed to read length field".to_string()));
+        }
+
+        let length = u16::from_be_bytes(len_buf);
+
+        let mut payload = vec![0u8; length as usize];
+        if length > 0 {
+            let n = self
+                .transport
+                .receive_timeout(&mut payload, timeout)?;
+
+            if n != length as usize {
+                return Err(Error::Protocol(format!(
+                    "Expected {} bytes, got {}",
+                    length, n
+                )));
             }
         }
 
-        Ok(fragment_manager.finalize())
+        let full_header = Header::new(header.status, true, header.seq, Some(length))?;
+        Message::new(full_header, Bytes::from(payload))
     }
 
-    /// Close the connection
+    fn read_ack(&mut self) -> Result<()> {
+        let msg = self.read_message()?;
+
+        if !msg.is_ack() {
+            if msg.is_cancel() {
+                let reason = String::from_utf8_lossy(&msg.payload);
+                return Err(Error::Cancelled(reason.to_string()));
+            }
+            return Err(Error::Protocol(format!(
+                "Expected ACK, got status {:?}",
+                msg.header.status
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn send_ack(&mut self, seq: u8) -> Result<()> {
+        let ack = Message::ack(seq, true)?;
+        self.transport.send(&ack.to_bytes())?;
+        Ok(())
+    }
+
     pub fn close(mut self) -> Result<()> {
         self.state = ConnectionState::Closed;
         self.transport.close()
     }
 
-    /// Get current connection state
     pub fn state(&self) -> ConnectionState {
         self.state
     }
 
-    /// Get negotiated parameters
     pub fn parameters(&self) -> Option<&Parameters> {
         self.parameters.as_ref()
     }

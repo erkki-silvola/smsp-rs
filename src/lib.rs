@@ -97,7 +97,7 @@ pub use transport::tcp::TcpTransport;
 pub use transport::mock::MockTransport;
 
 // Re-export session types for advanced usage
-pub use session::{FlowControl, FragmentManager, SequenceTracker};
+pub use session::SequenceTracker;
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
