@@ -77,13 +77,13 @@ mod tests {
     #[test]
     fn test_sequence_validation() {
         let mut seq = SequenceTracker::new();
-        
+
         assert!(seq.validate_and_advance(0));
         assert_eq!(seq.current(), 1);
-        
+
         assert!(!seq.validate_and_advance(0)); // Wrong sequence
         assert_eq!(seq.current(), 1); // Didn't advance
-        
+
         assert!(seq.validate_and_advance(1));
         assert_eq!(seq.current(), 2);
     }
@@ -91,13 +91,13 @@ mod tests {
     #[test]
     fn test_sequence_wraparound() {
         let mut seq = SequenceTracker::new();
-        
+
         // Advance to 15
         for _ in 0..15 {
             seq.advance();
         }
         assert_eq!(seq.current(), 15);
-        
+
         // Should wrap to 0
         seq.advance();
         assert_eq!(seq.current(), 0);
@@ -109,7 +109,7 @@ mod tests {
         seq.advance();
         seq.advance();
         assert_eq!(seq.current(), 2);
-        
+
         seq.reset();
         assert_eq!(seq.current(), 0);
     }

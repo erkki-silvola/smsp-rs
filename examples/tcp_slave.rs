@@ -24,11 +24,18 @@ fn main() -> Result<()> {
         match stream {
             Ok(stream) => {
                 let peer_addr = stream.peer_addr()?;
-                println!("[Connection #{}] New connection from {}", conn_num + 1, peer_addr);
+                println!(
+                    "[Connection #{}] New connection from {}",
+                    conn_num + 1,
+                    peer_addr
+                );
 
                 match handle_connection(stream) {
                     Ok(_) => {
-                        println!("[Connection #{}] Connection closed successfully", conn_num + 1);
+                        println!(
+                            "[Connection #{}] Connection closed successfully",
+                            conn_num + 1
+                        );
                     }
                     Err(e) => {
                         eprintln!("[Connection #{}] Error: {:?}", conn_num + 1, e);
@@ -72,7 +79,7 @@ fn handle_connection(stream: std::net::TcpStream) -> Result<()> {
 
                 // Process request and generate response
                 let response = process_request(&request);
-                
+
                 println!("  Sending response ({} bytes)...", response.len());
                 slave.send_response(&response)?;
                 println!("  Response sent");

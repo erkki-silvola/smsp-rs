@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::protocol::header::{Header, Status};
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
 /// Complete SMSP message with header and payload
 #[derive(Debug, Clone)]
@@ -169,7 +169,7 @@ mod tests {
     fn test_serialization() {
         let payload = Bytes::from_static(b"test");
         let msg = Message::last(10, true, payload).unwrap();
-        
+
         let bytes = msg.to_bytes();
         let (decoded, consumed) = Message::from_bytes(&bytes).unwrap();
 

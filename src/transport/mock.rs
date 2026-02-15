@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Mock transport for testing
-/// 
+///
 /// Allows simulating bidirectional communication without actual I/O
 #[derive(Clone)]
 pub struct MockTransport {
@@ -98,7 +98,7 @@ impl Transport for MockTransport {
         }
 
         let mut rx = self.rx_buffer.lock().unwrap();
-        
+
         if rx.is_empty() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
@@ -120,7 +120,7 @@ impl Transport for MockTransport {
         }
 
         let mut rx = self.rx_buffer.lock().unwrap();
-        
+
         if rx.is_empty() {
             return Err(Error::Timeout);
         }

@@ -78,17 +78,17 @@
 //! # }
 //! ```
 
+pub mod connection;
 pub mod error;
 pub mod protocol;
-pub mod transport;
 pub mod session;
-pub mod connection;
+pub mod transport;
 
 // Re-export commonly used types
+pub use connection::{ConnectionState, MasterConnection, SlaveConnection};
 pub use error::{Error, Result};
 pub use protocol::{Header, Message, Parameters, Status};
 pub use transport::Transport;
-pub use connection::{ConnectionState, MasterConnection, SlaveConnection};
 
 // Re-export transport implementations
 #[cfg(feature = "tcp")]

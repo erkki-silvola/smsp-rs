@@ -40,11 +40,16 @@ impl<T: Transport> MasterConnection<T> {
             .transport
             .receive_timeout(&mut buf, Duration::from_secs(5))?;
 
-        let response = std::str::from_utf8(&buf[..n]).map_err(|_| {
-            Error::InvalidParameters("Response is not valid UTF-8".to_string())
-        })?;
+        let response = std::str::from_utf8(&buf[..n])
+            .map_err(|_| Error::InvalidParameters("Response is not valid UTF-8".to_string()))?;
 
         let parameters = Parameters::from_response(response)?;
+
+        if !parameters.length_present {
+            return Err(Error::InvalidParameters(
+                "Master only implements version where lenght needs to be present".to_string(),
+            ));
+        }
 
         self.parameters = Some(parameters.clone());
         self.state = ConnectionState::Ready;
@@ -95,10 +100,6 @@ impl<T: Transport> MasterConnection<T> {
     }
 
     fn receive_response(&mut self) -> Result<Bytes> {
-        if self.parameters.is_none() {
-            return Err(Error::InvalidState("Parameters not initialized".to_string()));
-        }
-
         let mut response_seq = SequenceTracker::new();
         let mut response = BytesMut::new();
 
@@ -137,38 +138,24 @@ impl<T: Transport> MasterConnection<T> {
             .timeout;
 
         let mut buf = [0u8; 1];
-        let n = self
-            .transport
-            .receive_timeout(&mut buf, timeout)?;
+        let n = self.transport.receive_timeout(&mut buf, timeout)?;
 
-        if n != 1 {
-            return Err(Error::Protocol("Failed to read header byte".to_string()));
-        }
+        assert_eq!(n, 1);
 
         let header = Header::from_bytes(&buf)?;
 
-        if !header.length_present {
-            return Err(Error::Protocol(
-                "Protocol version without length not supported".to_string(),
-            ));
-        }
+        assert_eq!(header.length_present, true);
 
         let mut len_buf = [0u8; 2];
-        let n = self
-            .transport
-            .receive_timeout(&mut len_buf, timeout)?;
+        let n = self.transport.receive_timeout(&mut len_buf, timeout)?;
 
-        if n != 2 {
-            return Err(Error::Protocol("Failed to read length field".to_string()));
-        }
+        assert_eq!(n, 2);
 
         let length = u16::from_be_bytes(len_buf);
 
         let mut payload = vec![0u8; length as usize];
         if length > 0 {
-            let n = self
-                .transport
-                .receive_timeout(&mut payload, timeout)?;
+            let n = self.transport.receive_timeout(&mut payload, timeout)?;
 
             if n != length as usize {
                 return Err(Error::Protocol(format!(
@@ -227,7 +214,7 @@ mod tests {
     #[test]
     fn test_master_initialization() {
         let mut transport = MockTransport::new();
-        
+
         // Prepare the slave response in advance
         let params = Parameters::default_slave();
         transport.add_rx_data(params.to_response().as_bytes());

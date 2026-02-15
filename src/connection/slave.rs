@@ -247,7 +247,9 @@ mod tests {
         let (mut master_transport, slave_transport) = MockTransport::pair();
 
         // Send init request
-        master_transport.send(Parameters::INIT_REQUEST.as_bytes()).unwrap();
+        master_transport
+            .send(Parameters::INIT_REQUEST.as_bytes())
+            .unwrap();
 
         let mut slave = SlaveConnection::with_defaults(slave_transport);
         slave.wait_for_init().unwrap();

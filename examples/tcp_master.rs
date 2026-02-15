@@ -32,17 +32,18 @@ fn main() -> Result<()> {
     println!("Sending request: 'Hello, Slave!'");
     let request_data = b"Hello, Slave!";
     let response = master.request(request_data)?;
-    
+
     println!("Received response ({} bytes):", response.len());
     println!("  {}", String::from_utf8_lossy(&response));
     println!();
 
     // Send a larger request to test fragmentation
     println!("Sending larger request to test fragmentation...");
-    let large_data = "This is a larger message that will be split into multiple fragments. ".repeat(10);
+    let large_data =
+        "This is a larger message that will be split into multiple fragments. ".repeat(10);
     let large_data_bytes = large_data.as_bytes();
     println!("  Data size: {} bytes", large_data_bytes.len());
-    
+
     let response = master.request(large_data_bytes)?;
     println!("Received response ({} bytes):", response.len());
     println!("  {}", String::from_utf8_lossy(&response));

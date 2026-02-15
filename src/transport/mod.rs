@@ -7,7 +7,7 @@ pub mod tcp;
 pub mod mock;
 
 /// Abstract transport layer for SMSP protocol
-/// 
+///
 /// Implementations provide the underlying communication mechanism
 /// (TCP, serial, etc.) with blocking I/O operations.
 pub trait Transport: Send {

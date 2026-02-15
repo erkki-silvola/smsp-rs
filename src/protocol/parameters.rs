@@ -57,9 +57,9 @@ impl Parameters {
             }
         };
 
-        let timeout_ms = parts[2].parse::<u64>().map_err(|_| {
-            Error::InvalidParameters(format!("Invalid timeout: {}", parts[2]))
-        })?;
+        let timeout_ms = parts[2]
+            .parse::<u64>()
+            .map_err(|_| Error::InvalidParameters(format!("Invalid timeout: {}", parts[2])))?;
         let timeout = Duration::from_millis(timeout_ms);
 
         let fragment_count = parts[3].parse::<u8>().map_err(|_| {
@@ -76,9 +76,9 @@ impl Parameters {
             Error::InvalidParameters(format!("Invalid fragment_max_size: {}", parts[4]))
         })?;
 
-        if fragment_max_size == 0 {
+        if !length_present && fragment_count != 0 {
             return Err(Error::InvalidParameters(
-                "fragment_max_size must be at least 1".to_string(),
+                "When length_present is false, fragment_count must be 0".to_string(),
             ));
         }
 

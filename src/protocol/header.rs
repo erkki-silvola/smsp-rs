@@ -32,7 +32,7 @@ impl Status {
 }
 
 /// Protocol header
-/// 
+///
 /// Bit layout (Byte 0):
 /// - Bits 0-1: status (2 bits)
 /// - Bit 2: length_present (1 bit)
@@ -53,7 +53,7 @@ pub struct Header {
 impl Header {
     /// Minimum header size (without length field)
     pub const MIN_SIZE: usize = 1;
-    
+
     /// Maximum header size (with length field)
     pub const MAX_SIZE: usize = 3;
 
@@ -91,10 +91,9 @@ impl Header {
         let mut bytes = Vec::with_capacity(Self::MAX_SIZE);
 
         // First byte: status (bits 0-1) | length_present (bit 2) | reserved (bit 3) | seq (bits 4-7)
-        let first_byte = self.status.to_bits()
-            | ((self.length_present as u8) << 2)
-            | ((self.seq & 0x0F) << 4);
-        
+        let first_byte =
+            self.status.to_bits() | ((self.length_present as u8) << 2) | ((self.seq & 0x0F) << 4);
+
         bytes.push(first_byte);
 
         // Length field (big-endian u16)
@@ -170,7 +169,7 @@ mod tests {
     fn test_header_serialization() {
         let header = Header::new(Status::More, true, 5, Some(256)).unwrap();
         let bytes = header.to_bytes();
-        
+
         assert_eq!(bytes.len(), 3);
         assert_eq!(bytes[0] & 0b00000011, 0b00000001); // Status::More in bits 0-1
         assert_eq!(bytes[0] & 0b00000100, 0b00000100); // length_present in bit 2
@@ -184,7 +183,7 @@ mod tests {
         // 0b01010101 = 0x55: status=01, length_present=1, reserved=0, seq=0101
         let bytes = vec![0b01010101, 0x01, 0x00];
         let header = Header::from_bytes(&bytes).unwrap();
-        
+
         assert_eq!(header.status, Status::More);
         assert_eq!(header.length_present, true);
         assert_eq!(header.seq, 5);
@@ -204,7 +203,7 @@ mod tests {
         let original = Header::new(Status::Last, true, 15, Some(1024)).unwrap();
         let bytes = original.to_bytes();
         let decoded = Header::from_bytes(&bytes).unwrap();
-        
+
         assert_eq!(original, decoded);
     }
 }

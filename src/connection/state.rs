@@ -21,10 +21,7 @@ impl ConnectionState {
 
     /// Check if the connection is established (negotiating or ready)
     pub fn is_established(&self) -> bool {
-        matches!(
-            self,
-            ConnectionState::Negotiating | ConnectionState::Ready
-        )
+        matches!(self, ConnectionState::Negotiating | ConnectionState::Ready)
     }
 
     /// Check if the connection is closed or in error
@@ -48,7 +45,7 @@ mod tests {
         assert!(!ConnectionState::Uninitialized.is_established());
         assert!(ConnectionState::Negotiating.is_established());
         assert!(ConnectionState::Ready.is_established());
-        
+
         assert!(!ConnectionState::Ready.is_terminated());
         assert!(ConnectionState::Error.is_terminated());
         assert!(ConnectionState::Closed.is_terminated());

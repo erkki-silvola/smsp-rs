@@ -14,7 +14,7 @@ impl TcpTransport {
     pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self> {
         let stream = TcpStream::connect(addr)?;
         stream.set_nodelay(true)?; // Disable Nagle's algorithm for low latency
-        
+
         Ok(TcpTransport {
             stream: Some(stream),
         })
@@ -23,7 +23,7 @@ impl TcpTransport {
     /// Create a TCP transport from an existing TcpStream
     pub fn from_stream(stream: TcpStream) -> Result<Self> {
         stream.set_nodelay(true)?;
-        
+
         Ok(TcpTransport {
             stream: Some(stream),
         })
@@ -59,24 +59,26 @@ impl Transport for TcpTransport {
 
     fn receive_timeout(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize> {
         let stream = self.stream_mut()?;
-        
+
         // Set read timeout
         stream.set_read_timeout(Some(timeout))?;
-        
+
         // Try to read
         let result = stream.read(buf);
-        
+
         // Clear timeout
         stream.set_read_timeout(None)?;
-        
+
         match result {
             Ok(0) => Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "Connection closed",
             ))),
             Ok(n) => Ok(n),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock 
-                   || e.kind() == std::io::ErrorKind::TimedOut => {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
                 Err(Error::Timeout)
             }
             Err(e) => Err(Error::Io(e)),
