@@ -4,36 +4,44 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-/// TCP transport implementation
+/// TCP transport implementation.
+///
+/// Wraps a `TcpStream` with Nagle's algorithm disabled for low-latency
+/// IoT communication.
 pub struct TcpTransport {
     stream: Option<TcpStream>,
 }
 
 impl TcpTransport {
-    /// Create a new TCP transport by connecting to an address
+    /// Create a new TCP transport by connecting to an address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection cannot be established.
     pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self> {
         let stream = TcpStream::connect(addr)?;
-        stream.set_nodelay(true)?; // Disable Nagle's algorithm for low latency
-
-        Ok(TcpTransport {
+        stream.set_nodelay(true)?;
+        Ok(Self {
             stream: Some(stream),
         })
     }
 
-    /// Create a TCP transport from an existing TcpStream
+    /// Create a TCP transport from an existing `TcpStream`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `set_nodelay` fails.
     pub fn from_stream(stream: TcpStream) -> Result<Self> {
         stream.set_nodelay(true)?;
-
-        Ok(TcpTransport {
+        Ok(Self {
             stream: Some(stream),
         })
     }
 
-    /// Get a mutable reference to the underlying stream
     fn stream_mut(&mut self) -> Result<&mut TcpStream> {
         self.stream
             .as_mut()
-            .ok_or_else(|| Error::InvalidState("Transport not connected".to_string()))
+            .ok_or_else(|| Error::InvalidState("Transport not connected".into()))
     }
 }
 
@@ -59,16 +67,9 @@ impl Transport for TcpTransport {
 
     fn receive_timeout(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize> {
         let stream = self.stream_mut()?;
-
-        // Set read timeout
         stream.set_read_timeout(Some(timeout))?;
-
-        // Try to read
         let result = stream.read(buf);
-
-        // Clear timeout
         stream.set_read_timeout(None)?;
-
         match result {
             Ok(0) => Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -111,7 +112,6 @@ mod tests {
 
     #[test]
     fn test_tcp_send_receive() {
-        // Start a simple echo server
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -120,19 +120,16 @@ mod tests {
             let mut buf = [0u8; 1024];
             loop {
                 match stream.read(&mut buf) {
-                    Ok(0) => break,
+                    Ok(0) | Err(_) => break,
                     Ok(n) => {
                         stream.write_all(&buf[..n]).unwrap();
                     }
-                    Err(_) => break,
                 }
             }
         });
 
-        // Give server time to start
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(50));
 
-        // Connect and test
         let mut transport = TcpTransport::connect(addr).unwrap();
         assert!(transport.is_connected());
 
