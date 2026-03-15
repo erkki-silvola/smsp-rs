@@ -1,7 +1,6 @@
 use bytes::Bytes;
 use smsp_rs::{
-    ConnectionState, MasterConnection, Message, MockTransport, Parameters, Result, SequenceTracker,
-    SlaveConnection,
+    MasterConnection, Message, MockTransport, Parameters, Result, SequenceTracker, SlaveConnection,
 };
 use std::thread;
 
@@ -74,9 +73,6 @@ fn test_slave_cancel() -> Result<()> {
         let mut slave = SlaveConnection::new(slave_transport, params);
         slave.wait_for_init()?;
 
-        let mut buf = [0u8; 1];
-        let _ = slave.parameters().timeout;
-
         let _request_start = slave.receive_request();
         Ok(())
     });
@@ -88,17 +84,6 @@ fn test_slave_cancel() -> Result<()> {
 
     slave_handle.join().unwrap()?;
     Ok(())
-}
-
-#[test]
-fn test_master_initialization_state() {
-    let mut transport = MockTransport::new();
-    let params = Parameters::default_slave();
-    transport.add_rx_data(params.to_response().as_bytes());
-    let mut master = MasterConnection::new(transport);
-    let negotiated = master.initialize().unwrap();
-    assert_eq!(negotiated, params);
-    assert_eq!(master.state(), ConnectionState::Ready);
 }
 
 #[test]

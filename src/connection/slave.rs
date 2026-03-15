@@ -1,9 +1,10 @@
+use crate::connection::io;
 use crate::connection::state::ConnectionState;
 use crate::error::{Error, Result};
-use crate::protocol::{Header, Message, Parameters};
+use crate::protocol::{Message, Parameters};
 use crate::session::SequenceTracker;
 use crate::transport::Transport;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 
 /// Slave (connection receiver) side of the SMSP protocol.
 ///
@@ -60,12 +61,7 @@ impl<T: Transport> SlaveConnection<T> {
     /// Returns an error if not in `Uninitialized` state or if the master
     /// sends an invalid initialization request.
     pub fn wait_for_init(&mut self) -> Result<()> {
-        if self.state != ConnectionState::Uninitialized {
-            return Err(Error::InvalidState(format!(
-                "Cannot initialize from state {:?}",
-                self.state
-            )));
-        }
+        self.state.require_initializing()?;
         self.state = ConnectionState::Negotiating;
 
         let mut buf = [0u8; 256];
@@ -98,51 +94,17 @@ impl<T: Transport> SlaveConnection<T> {
     /// Returns an error if not in `Ready` state, on timeout, or if
     /// the master cancels.
     pub fn receive_request(&mut self) -> Result<Bytes> {
-        if !self.state.can_transfer() {
-            return Err(Error::InvalidState(format!(
-                "Cannot receive request in state {:?}",
-                self.state
-            )));
+        self.state.require_can_transfer()?;
+        let result = io::receive_fragments(
+            &mut self.transport,
+            self.parameters.length_present,
+            self.parameters.fragment_count,
+            self.parameters.timeout,
+        );
+        if let Err(Error::Sequence { actual, .. }) = result {
+            let _ = self.send_cancel(actual, "Sequence error");
         }
-        let length_present = self.parameters.length_present;
-        let fragment_count = self.parameters.fragment_count;
-        let timeout = self.parameters.timeout;
-
-        let mut request_seq = SequenceTracker::new();
-        let mut request_data = BytesMut::new();
-        let mut received_since_ack: u8 = 0;
-
-        loop {
-            let msg = self.read_message(length_present, timeout)?;
-
-            if msg.is_cancel() {
-                return Err(Error::Cancelled(
-                    String::from_utf8_lossy(&msg.payload).into(),
-                ));
-            }
-
-            if !request_seq.validate_and_advance(msg.header.seq) {
-                self.send_cancel(msg.header.seq, "Sequence error")?;
-                return Err(Error::Sequence {
-                    expected: request_seq.current(),
-                    actual: msg.header.seq,
-                });
-            }
-
-            let is_last = msg.is_last();
-            request_data.extend_from_slice(&msg.payload);
-
-            if is_last {
-                return Ok(request_data.freeze());
-            }
-
-            received_since_ack += 1;
-            if received_since_ack >= fragment_count {
-                let ack = Message::ack(0, length_present)?;
-                self.transport.send(&ack.to_bytes())?;
-                received_since_ack = 0;
-            }
-        }
+        result
     }
 
     /// Send a response to the master.
@@ -155,48 +117,17 @@ impl<T: Transport> SlaveConnection<T> {
     /// Returns an error if not in `Ready` state, on timeout, or if
     /// the master cancels.
     pub fn send_response(&mut self, data: &[u8]) -> Result<()> {
-        if !self.state.can_transfer() {
-            return Err(Error::InvalidState(format!(
-                "Cannot send response in state {:?}",
-                self.state
-            )));
-        }
-
+        self.state.require_can_transfer()?;
         self.sequence.reset();
-        let length_present = self.parameters.length_present;
-        let fragment_count = self.parameters.fragment_count;
-        let max_size = self.parameters.fragment_max_size as usize;
-        let timeout = self.parameters.timeout;
-
-        let chunks: Vec<&[u8]> = if length_present {
-            data.chunks(max_size).collect()
-        } else {
-            vec![data]
-        };
-        let total = chunks.len();
-        let mut sent_since_ack: u8 = 0;
-
-        for (i, chunk) in chunks.iter().enumerate() {
-            let is_last = i + 1 == total;
-            let seq = self.sequence.next_seq();
-            let msg = if is_last {
-                Message::last(seq, length_present, Bytes::copy_from_slice(chunk))?
-            } else {
-                Message::more(seq, length_present, Bytes::copy_from_slice(chunk))?
-            };
-            self.transport.send(&msg.to_bytes())?;
-
-            if is_last {
-                break;
-            }
-
-            sent_since_ack += 1;
-            if sent_since_ack >= fragment_count {
-                self.wait_ack(length_present, timeout)?;
-                sent_since_ack = 0;
-            }
-        }
-        Ok(())
+        io::send_fragments(
+            &mut self.transport,
+            data,
+            self.parameters.length_present,
+            self.parameters.fragment_count,
+            self.parameters.fragment_max_size as usize,
+            self.parameters.timeout,
+            &mut self.sequence,
+        )
     }
 
     /// Send a CANCEL/error message to the master.
@@ -205,71 +136,8 @@ impl<T: Transport> SlaveConnection<T> {
     ///
     /// Returns an error if not in a transferable state.
     pub fn send_error(&mut self, reason: &str) -> Result<()> {
-        if !self.state.can_transfer() {
-            return Err(Error::InvalidState(format!(
-                "Cannot send error in state {:?}",
-                self.state
-            )));
-        }
+        self.state.require_can_transfer()?;
         self.send_cancel(self.sequence.current(), reason)
-    }
-
-    fn wait_ack(&mut self, length_present: bool, timeout: std::time::Duration) -> Result<()> {
-        let msg = self.read_message(length_present, timeout)?;
-        if msg.is_cancel() {
-            return Err(Error::Cancelled(
-                String::from_utf8_lossy(&msg.payload).into(),
-            ));
-        }
-        if !msg.is_ack() {
-            return Err(Error::Protocol(format!(
-                "Expected ACK, got status {:?}",
-                msg.header.status
-            )));
-        }
-        Ok(())
-    }
-
-    fn read_message(
-        &mut self,
-        length_present: bool,
-        timeout: std::time::Duration,
-    ) -> Result<Message> {
-        let mut hdr_byte = [0u8; 1];
-        self.read_exact(&mut hdr_byte, timeout)?;
-        let header = Header::from_bytes(&hdr_byte)?;
-
-        if length_present {
-            let mut len_buf = [0u8; 2];
-            self.read_exact(&mut len_buf, timeout)?;
-            let length = u16::from_be_bytes(len_buf);
-            let mut payload = vec![0u8; length as usize];
-            if length > 0 {
-                self.read_exact(&mut payload, timeout)?;
-            }
-            let full_header = Header::new(header.status, true, header.seq, Some(length))?;
-            Message::new(full_header, Bytes::from(payload))
-        } else {
-            let mut buf = [0u8; 65535];
-            let n = self.transport.receive_timeout(&mut buf, timeout)?;
-            let payload = Bytes::copy_from_slice(&buf[..n]);
-            let full_header = Header::new(header.status, false, header.seq, None)?;
-            Message::new(full_header, payload)
-        }
-    }
-
-    fn read_exact(&mut self, buf: &mut [u8], timeout: std::time::Duration) -> Result<()> {
-        let mut offset = 0;
-        while offset < buf.len() {
-            let n = self
-                .transport
-                .receive_timeout(&mut buf[offset..], timeout)?;
-            if n == 0 {
-                return Err(Error::Protocol("Unexpected EOF during read".into()));
-            }
-            offset += n;
-        }
-        Ok(())
     }
 
     fn send_cancel(&mut self, seq: u8, reason: &str) -> Result<()> {

@@ -223,7 +223,7 @@ ACK: status=ACK(00), seq=0, length=0, payload=[]
 
 ### ACK Sequence
 - ACK messages use seq=0
-- ACK message may contain optionally payload
+- ACK message may contain optionally payload, shall always fit in one fragment if length present
 
 ## Message Types
 

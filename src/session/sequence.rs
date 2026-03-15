@@ -29,12 +29,8 @@ impl SequenceTracker {
         self.current = 0;
     }
 
-    pub fn is_expected(&self, seq: u8) -> bool {
-        seq == self.current
-    }
-
     pub fn validate_and_advance(&mut self, seq: u8) -> bool {
-        if self.is_expected(seq) {
+        if seq == self.current {
             self.advance();
             true
         } else {

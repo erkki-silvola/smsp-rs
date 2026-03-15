@@ -1,3 +1,4 @@
+pub(crate) mod io;
 pub mod master;
 pub mod slave;
 pub mod state;

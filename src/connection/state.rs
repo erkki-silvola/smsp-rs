@@ -1,3 +1,5 @@
+use crate::error::{Error, Result};
+
 /// Connection state machine.
 ///
 /// ```text
@@ -28,5 +30,25 @@ impl ConnectionState {
     /// Check if the connection is closed or in error.
     pub fn is_terminated(&self) -> bool {
         matches!(self, Self::Error | Self::Closed)
+    }
+
+    pub fn require_initializing(self) -> Result<()> {
+        if self != Self::Uninitialized {
+            return Err(Error::InvalidState(format!(
+                "Cannot initialize from state {:?}",
+                self
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn require_can_transfer(self) -> Result<()> {
+        if !self.can_transfer() {
+            return Err(Error::InvalidState(format!(
+                "Cannot transfer in state {:?}",
+                self
+            )));
+        }
+        Ok(())
     }
 }
