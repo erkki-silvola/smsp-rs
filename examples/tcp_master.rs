@@ -1,16 +1,17 @@
 use smsp_rs::{MasterConnection, Result, TcpTransport};
 use std::env;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     let addr = args.get(1).map_or("127.0.0.1:8080", |s| s.as_str());
 
-    println!("Connecting to slave at {addr}...");
-    let transport = TcpTransport::connect(addr)?;
+    println!("Connecting to device at {addr}...");
+    let transport = TcpTransport::connect(addr).await?;
     let mut master = MasterConnection::new(transport);
 
     println!("Initializing connection...");
-    let params = master.initialize()?;
+    let params = master.initialize().await?;
     println!("Connected! Parameters:");
     println!("  Protocol version: {}", params.protocol_version);
     println!("  Length present: {}", params.length_present);
@@ -19,8 +20,8 @@ fn main() -> Result<()> {
     println!("  Fragment max size: {} bytes", params.fragment_max_size);
     println!();
 
-    println!("Sending request: 'Hello, Slave!'");
-    let response = master.request(b"Hello, Slave!")?;
+    println!("Sending request: 'Hello, Device!'");
+    let response = master.request(b"Hello, Device!").await?;
     println!(
         "Response ({} bytes): {}",
         response.len(),
@@ -32,7 +33,7 @@ fn main() -> Result<()> {
     let large_data =
         "This is a larger message that will be split into multiple fragments. ".repeat(10);
     println!("  Data size: {} bytes", large_data.len());
-    let response = master.request(large_data.as_bytes())?;
+    let response = master.request(large_data.as_bytes()).await?;
     println!(
         "Response ({} bytes): {}",
         response.len(),
@@ -41,7 +42,7 @@ fn main() -> Result<()> {
     println!();
 
     println!("Closing connection...");
-    master.close()?;
+    master.close().await?;
     println!("Done.");
     Ok(())
 }

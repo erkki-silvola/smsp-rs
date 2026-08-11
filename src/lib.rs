@@ -6,44 +6,34 @@
 //! reliable request/response communication with message fragmentation
 //! and flow control.
 //!
+//! This crate provides an **async, master-only** client library. The library
+//! is runtime-agnostic via the [`Transport`] trait; examples use Tokio.
+//!
+//! ## Features
+//!
+//! - `tcp` (default): [`TcpTransport`] via Tokio
+//! - `serial`: [`SerialTransport`] via `serialport-stream`
+//!
+//! [`MockTransport`] is always available for testing and integration-style simulations.
+//!
 //! ## Architecture
 //!
 //! - **Protocol Layer**: Message format, headers, and parameters
-//! - **Transport Layer**: Abstract interface for different transports
+//! - **Transport Layer**: Abstract async interface for different transports
 //! - **Session Layer**: Fragment management, sequencing, flow control
-//! - **Connection Layer**: Master and slave connection management
+//! - **Connection Layer**: Master connection management
 //!
 //! ## Example (Master)
 //!
 //! ```rust,no_run
 //! use smsp_rs::{MasterConnection, TcpTransport};
 //!
-//! # fn main() -> smsp_rs::Result<()> {
-//! let transport = TcpTransport::connect("192.168.1.100:8080")?;
+//! # async fn example() -> smsp_rs::Result<()> {
+//! let transport = TcpTransport::connect("192.168.1.100:8080").await?;
 //! let mut master = MasterConnection::new(transport);
-//! let params = master.initialize()?;
-//! let response = master.request(b"Hello, Device!")?;
-//! master.close()?;
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! ## Example (Slave)
-//!
-//! ```rust,no_run
-//! use smsp_rs::{SlaveConnection, TcpTransport};
-//! use std::net::TcpListener;
-//!
-//! # fn main() -> smsp_rs::Result<()> {
-//! let listener = TcpListener::bind("0.0.0.0:8080")?;
-//! for stream in listener.incoming() {
-//!     let transport = TcpTransport::from_stream(stream?)?;
-//!     let mut slave = SlaveConnection::with_defaults(transport);
-//!     slave.wait_for_init()?;
-//!     let request = slave.receive_request()?;
-//!     slave.send_response(b"Hello, Master!")?;
-//!     slave.close()?;
-//! }
+//! let params = master.initialize().await?;
+//! let response = master.request(b"Hello, Device!").await?;
+//! master.close().await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -54,11 +44,14 @@ pub mod protocol;
 pub mod session;
 pub mod transport;
 
-pub use connection::{ConnectionState, MasterConnection, SlaveConnection};
+pub use connection::{ConnectionState, MasterConnection};
 pub use error::{Error, Result};
 pub use protocol::{Header, Message, Parameters, Status};
 pub use session::SequenceTracker;
 pub use transport::Transport;
+
+#[cfg(feature = "serial")]
+pub use transport::serial::SerialTransport;
 
 #[cfg(feature = "tcp")]
 pub use transport::tcp::TcpTransport;

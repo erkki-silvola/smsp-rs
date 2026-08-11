@@ -10,20 +10,20 @@ use std::time::Duration;
 /// Master (connection initiator) side of the SMSP protocol.
 ///
 /// The master initiates the connection, negotiates parameters with the
-/// slave, then performs request/response cycles. Large messages are
-/// automatically fragmented according to the negotiated parameters.
+/// remote device, then performs request/response cycles. Large messages
+/// are automatically fragmented according to the negotiated parameters.
 ///
 /// # Example
 ///
 /// ```rust,no_run
 /// use smsp_rs::{MasterConnection, TcpTransport};
 ///
-/// # fn main() -> smsp_rs::Result<()> {
-/// let transport = TcpTransport::connect("192.168.1.100:8080")?;
+/// # async fn example() -> smsp_rs::Result<()> {
+/// let transport = TcpTransport::connect("192.168.1.100:8080").await?;
 /// let mut master = MasterConnection::new(transport);
-/// let params = master.initialize()?;
-/// let response = master.request(b"Hello, Device!")?;
-/// master.close()?;
+/// let params = master.initialize().await?;
+/// let response = master.request(b"Hello, Device!").await?;
+/// master.close().await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -45,23 +45,26 @@ impl<T: Transport> MasterConnection<T> {
         }
     }
 
-    /// Initialize the connection by negotiating parameters with the slave.
+    /// Initialize the connection by negotiating parameters with the remote device.
     ///
     /// Sends `"parameters?\0"` and expects a parameter response within 5 seconds.
     ///
     /// # Errors
     ///
     /// Returns an error if not in `Uninitialized` state, on timeout,
-    /// or if the slave's parameters are invalid.
-    pub fn initialize(&mut self) -> Result<Parameters> {
+    /// or if the remote parameters are invalid.
+    pub async fn initialize(&mut self) -> Result<Parameters> {
         self.state.require_initializing()?;
         self.state = ConnectionState::Negotiating;
-        self.transport.send(Parameters::INIT_REQUEST.as_bytes())?;
+        self.transport
+            .send(Parameters::INIT_REQUEST.as_bytes())
+            .await?;
 
         let mut buf = [0u8; 256];
         let n = self
             .transport
-            .receive_timeout(&mut buf, Duration::from_secs(5))?;
+            .receive_timeout(&mut buf, Duration::from_secs(5))
+            .await?;
 
         let response = std::str::from_utf8(&buf[..n])
             .map_err(|_| Error::InvalidParameters("Response is not valid UTF-8".into()))?;
@@ -89,7 +92,7 @@ impl<T: Transport> MasterConnection<T> {
     ///
     /// Returns an error if the connection is not in `Ready` state, on
     /// timeout, or if the remote side cancels.
-    pub fn request(&mut self, data: &[u8]) -> Result<Bytes> {
+    pub async fn request(&mut self, data: &[u8]) -> Result<Bytes> {
         self.state.require_can_transfer()?;
         let params = self.params()?;
         let length_present = params.length_present;
@@ -106,8 +109,9 @@ impl<T: Transport> MasterConnection<T> {
             max_size,
             timeout,
             &mut self.sequence,
-        )?;
-        io::receive_fragments(&mut self.transport, length_present, fragment_count, timeout)
+        )
+        .await?;
+        io::receive_fragments(&mut self.transport, length_present, fragment_count, timeout).await
     }
 
     /// Close the connection.
@@ -115,9 +119,9 @@ impl<T: Transport> MasterConnection<T> {
     /// # Errors
     ///
     /// Returns an error if the transport cannot be closed.
-    pub fn close(mut self) -> Result<()> {
+    pub async fn close(mut self) -> Result<()> {
         self.state = ConnectionState::Closed;
-        self.transport.close()
+        self.transport.close().await
     }
 
     /// Get the current connection state.
@@ -142,23 +146,23 @@ mod tests {
     use super::*;
     use crate::transport::mock::MockTransport;
 
-    #[test]
-    fn test_master_initialization() {
+    #[tokio::test]
+    async fn test_master_initialization() {
         let mut transport = MockTransport::new();
         let params = Parameters::default_slave();
         transport.add_rx_data(params.to_response().as_bytes());
         let mut master = MasterConnection::new(transport);
-        let negotiated = master.initialize().unwrap();
+        let negotiated = master.initialize().await.unwrap();
         assert_eq!(negotiated, params);
         assert_eq!(master.state(), ConnectionState::Ready);
     }
 
-    #[test]
-    fn test_master_invalid_state() {
+    #[tokio::test]
+    async fn test_master_invalid_state() {
         let transport = MockTransport::new();
         let mut master = MasterConnection::new(transport);
         assert!(matches!(
-            master.request(b"test"),
+            master.request(b"test").await,
             Err(Error::InvalidState(_))
         ));
     }

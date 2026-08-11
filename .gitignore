@@ -4,6 +4,7 @@
 *.pdb
 *.md
 Cargo.lock
+.cursor
 
 # Cargo lock file (uncomment for applications, keep commented for libraries)
 # Cargo.lock

@@ -1,93 +1,223 @@
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use smsp_rs::{
-    MasterConnection, Message, MockTransport, Parameters, Result, SequenceTracker, SlaveConnection,
+    Error, MasterConnection, Message, MockTransport, Parameters, Result, SequenceTracker, Transport,
 };
-use std::thread;
+use std::time::Duration;
 
-#[test]
-fn test_full_request_response_with_length() -> Result<()> {
+async fn read_exact(
+    transport: &mut MockTransport,
+    buf: &mut [u8],
+    timeout: Duration,
+) -> Result<()> {
+    let mut offset = 0;
+    while offset < buf.len() {
+        let n = transport
+            .receive_timeout(&mut buf[offset..], timeout)
+            .await?;
+        if n == 0 {
+            return Err(Error::Protocol("Unexpected EOF during read".into()));
+        }
+        offset += n;
+    }
+    Ok(())
+}
+
+async fn read_message(
+    transport: &mut MockTransport,
+    length_present: bool,
+    timeout: Duration,
+) -> Result<Message> {
+    if length_present {
+        let mut hdr = [0u8; 3];
+        read_exact(transport, &mut hdr, timeout).await?;
+        let header = smsp_rs::Header::from_bytes(&hdr)?;
+        let length = header.length.unwrap_or(0);
+        let mut payload = vec![0u8; length as usize];
+        if length > 0 {
+            read_exact(transport, &mut payload, timeout).await?;
+        }
+        Message::new(header, Bytes::from(payload))
+    } else {
+        let mut hdr_byte = [0u8; 1];
+        read_exact(transport, &mut hdr_byte, timeout).await?;
+        let header = smsp_rs::Header::from_bytes(&hdr_byte)?;
+        let mut buf = [0u8; 65535];
+        let n = transport.receive_timeout(&mut buf, timeout).await?;
+        let payload = Bytes::copy_from_slice(&buf[..n]);
+        Message::new(header, payload)
+    }
+}
+
+async fn slave_wait_init(transport: &mut MockTransport, params: &Parameters) -> Result<()> {
+    let mut buf = [0u8; 256];
+    let n = transport.receive(&mut buf).await?;
+    let request = std::str::from_utf8(&buf[..n])
+        .map_err(|_| Error::InvalidParameters("Request is not valid UTF-8".into()))?;
+    if request != Parameters::INIT_REQUEST {
+        return Err(Error::Protocol(format!(
+            "Expected '{}', got '{}'",
+            Parameters::INIT_REQUEST,
+            request
+        )));
+    }
+    transport.send(params.to_response().as_bytes()).await?;
+    Ok(())
+}
+
+async fn slave_receive_request(
+    transport: &mut MockTransport,
+    params: &Parameters,
+) -> Result<Bytes> {
+    let mut seq = SequenceTracker::new();
+    let mut request = BytesMut::new();
+    let mut received_since_ack: u8 = 0;
+    loop {
+        let msg = read_message(transport, params.length_present, params.timeout).await?;
+        if msg.is_cancel() {
+            return Err(Error::Cancelled(
+                String::from_utf8_lossy(&msg.payload).into(),
+            ));
+        }
+        if !seq.validate_and_advance(msg.header.seq) {
+            return Err(Error::Sequence {
+                expected: seq.current(),
+                actual: msg.header.seq,
+            });
+        }
+        let is_last = msg.is_last();
+        request.extend_from_slice(&msg.payload);
+        if is_last {
+            return Ok(request.freeze());
+        }
+        received_since_ack += 1;
+        if received_since_ack >= params.fragment_count {
+            let ack = Message::ack(0, params.length_present)?;
+            transport.send(&ack.to_bytes()).await?;
+            received_since_ack = 0;
+        }
+    }
+}
+
+async fn slave_send_response(
+    transport: &mut MockTransport,
+    params: &Parameters,
+    data: &[u8],
+) -> Result<()> {
+    let mut sequence = SequenceTracker::new();
+    let max_size = params.fragment_max_size as usize;
+    let chunks: Vec<&[u8]> = if params.length_present {
+        if data.is_empty() {
+            vec![&[] as &[u8]]
+        } else {
+            data.chunks(max_size).collect()
+        }
+    } else {
+        vec![data]
+    };
+    let total = chunks.len();
+    let mut sent_since_ack: u8 = 0;
+    for (i, chunk) in chunks.iter().enumerate() {
+        let is_last = i + 1 == total;
+        let seq = sequence.next_seq();
+        let msg = if is_last {
+            Message::last(seq, params.length_present, Bytes::copy_from_slice(chunk))?
+        } else {
+            Message::more(seq, params.length_present, Bytes::copy_from_slice(chunk))?
+        };
+        transport.send(&msg.to_bytes()).await?;
+        if is_last {
+            break;
+        }
+        sent_since_ack += 1;
+        if sent_since_ack >= params.fragment_count {
+            let ack = read_message(transport, params.length_present, params.timeout).await?;
+            if !ack.is_ack() {
+                return Err(Error::Protocol("Expected ACK".into()));
+            }
+            sent_since_ack = 0;
+        }
+    }
+    Ok(())
+}
+
+async fn run_echo_slave(mut transport: MockTransport, params: Parameters) -> Result<Vec<u8>> {
+    slave_wait_init(&mut transport, &params).await?;
+    let request = slave_receive_request(&mut transport, &params).await?;
+    let mut response = b"Echo: ".to_vec();
+    response.extend_from_slice(&request);
+    slave_send_response(&mut transport, &params, &response).await?;
+    transport.close().await?;
+    Ok(response)
+}
+
+#[tokio::test]
+async fn test_full_request_response_with_length() -> Result<()> {
     let (master_transport, slave_transport) = MockTransport::pair();
-
-    let slave_handle = thread::spawn(move || -> Result<Vec<u8>> {
-        let mut slave = SlaveConnection::with_defaults(slave_transport);
-        slave.wait_for_init()?;
-        let request = slave.receive_request()?;
-        let mut response = b"Echo: ".to_vec();
-        response.extend_from_slice(&request);
-        slave.send_response(&response)?;
-        slave.close()?;
-        Ok(response)
-    });
+    let params = Parameters::default_slave();
+    let slave_handle = tokio::spawn(run_echo_slave(slave_transport, params));
 
     let mut master = MasterConnection::new(master_transport);
-    let params = master.initialize()?;
+    let params = master.initialize().await?;
     assert!(params.length_present);
     assert_eq!(params.fragment_count, 1);
 
-    let response = master.request(b"Hello, Slave!")?;
+    let response = master.request(b"Hello, Slave!").await?;
     assert_eq!(response.as_ref(), b"Echo: Hello, Slave!");
-    master.close()?;
+    master.close().await?;
 
-    slave_handle.join().unwrap()?;
+    assert_eq!(slave_handle.await.unwrap()?, b"Echo: Hello, Slave!");
     Ok(())
 }
 
-#[test]
-fn test_fragmented_request_response() -> Result<()> {
-    let (master_transport, slave_transport) = MockTransport::pair();
-
-    let slave_handle = thread::spawn(move || -> Result<()> {
-        let mut slave = SlaveConnection::with_defaults(slave_transport);
-        slave.wait_for_init()?;
-        let request = slave.receive_request()?;
+#[tokio::test]
+async fn test_fragmented_request_response() -> Result<()> {
+    let (master_transport, mut slave_transport) = MockTransport::pair();
+    let params = Parameters::default_slave();
+    let slave_handle = tokio::spawn(async move {
+        slave_wait_init(&mut slave_transport, &params).await?;
+        let request = slave_receive_request(&mut slave_transport, &params).await?;
         assert!(request.len() > 256);
-        slave.send_response(&request)?;
-        slave.close()?;
-        Ok(())
+        slave_send_response(&mut slave_transport, &params, &request).await?;
+        slave_transport.close().await?;
+        Ok::<(), Error>(())
     });
 
     let mut master = MasterConnection::new(master_transport);
-    master.initialize()?;
+    master.initialize().await?;
 
     let large_data = vec![0xAA; 700];
-    let response = master.request(&large_data)?;
+    let response = master.request(&large_data).await?;
     assert_eq!(response.as_ref(), &large_data[..]);
-    master.close()?;
+    master.close().await?;
 
-    slave_handle.join().unwrap()?;
+    slave_handle.await.unwrap()?;
     Ok(())
 }
 
-#[test]
-fn test_slave_cancel() -> Result<()> {
-    let (master_transport, slave_transport) = MockTransport::pair();
-
-    let slave_handle = thread::spawn(move || -> Result<()> {
-        let params = Parameters {
-            protocol_version: 1,
-            length_present: true,
-            timeout: std::time::Duration::from_millis(20000),
-            fragment_count: 1,
-            fragment_max_size: 256,
-        };
-        let mut slave = SlaveConnection::new(slave_transport, params);
-        slave.wait_for_init()?;
-
-        let _request_start = slave.receive_request();
-        Ok(())
+#[tokio::test]
+async fn test_remote_cancel() -> Result<()> {
+    let (master_transport, mut slave_transport) = MockTransport::pair();
+    let params = Parameters::default_slave();
+    let slave_handle = tokio::spawn(async move {
+        slave_wait_init(&mut slave_transport, &params).await?;
+        let _request = slave_receive_request(&mut slave_transport, &params).await?;
+        let cancel = Message::cancel(0, params.length_present, Bytes::from("error"))?;
+        slave_transport.send(&cancel.to_bytes()).await?;
+        slave_transport.close().await?;
+        Ok::<(), Error>(())
     });
 
     let mut master = MasterConnection::new(master_transport);
-    master.initialize()?;
+    master.initialize().await?;
+    let result = master.request(b"test").await;
+    assert!(matches!(result, Err(Error::Cancelled(_))));
 
-    let _result = master.request(b"test");
-
-    slave_handle.join().unwrap()?;
+    slave_handle.await.unwrap()?;
     Ok(())
 }
 
-#[test]
-fn test_protocol_message_flow() -> Result<()> {
+#[tokio::test]
+async fn test_protocol_message_flow() -> Result<()> {
     let msg = Message::more(0, true, Bytes::from_static(b"Hello"))?;
     assert!(msg.is_more());
     assert_eq!(msg.header.seq, 0);
@@ -97,8 +227,8 @@ fn test_protocol_message_flow() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn test_sequence_tracking() -> Result<()> {
+#[tokio::test]
+async fn test_sequence_tracking() -> Result<()> {
     let mut seq = SequenceTracker::new();
     for i in 0..5 {
         assert!(seq.validate_and_advance(i));
@@ -107,8 +237,8 @@ fn test_sequence_tracking() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn test_message_types() -> Result<()> {
+#[tokio::test]
+async fn test_message_types() -> Result<()> {
     let ack = Message::ack(0, true)?;
     assert!(ack.is_ack());
     assert!(ack.is_last());
@@ -126,26 +256,25 @@ fn test_message_types() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn test_empty_request_response() -> Result<()> {
-    let (master_transport, slave_transport) = MockTransport::pair();
-
-    let slave_handle = thread::spawn(move || -> Result<()> {
-        let mut slave = SlaveConnection::with_defaults(slave_transport);
-        slave.wait_for_init()?;
-        let request = slave.receive_request()?;
+#[tokio::test]
+async fn test_empty_request_response() -> Result<()> {
+    let (master_transport, mut slave_transport) = MockTransport::pair();
+    let params = Parameters::default_slave();
+    let slave_handle = tokio::spawn(async move {
+        slave_wait_init(&mut slave_transport, &params).await?;
+        let request = slave_receive_request(&mut slave_transport, &params).await?;
         assert!(request.is_empty());
-        slave.send_response(b"")?;
-        slave.close()?;
-        Ok(())
+        slave_send_response(&mut slave_transport, &params, b"").await?;
+        slave_transport.close().await?;
+        Ok::<(), Error>(())
     });
 
     let mut master = MasterConnection::new(master_transport);
-    master.initialize()?;
-    let response = master.request(b"")?;
+    master.initialize().await?;
+    let response = master.request(b"").await?;
     assert!(response.is_empty());
-    master.close()?;
+    master.close().await?;
 
-    slave_handle.join().unwrap()?;
+    slave_handle.await.unwrap()?;
     Ok(())
 }

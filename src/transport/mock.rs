@@ -1,8 +1,11 @@
 use crate::error::{Error, Result};
 use crate::transport::Transport;
 use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 /// Mock transport for testing.
 ///
@@ -31,16 +34,15 @@ impl MockTransport {
     pub fn pair() -> (Self, Self) {
         let a_to_b = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a = Arc::new(Mutex::new(VecDeque::new()));
-        let connected = Arc::new(Mutex::new(true));
         let a = Self {
             rx_buffer: b_to_a.clone(),
             tx_buffer: a_to_b.clone(),
-            connected: connected.clone(),
+            connected: Arc::new(Mutex::new(true)),
         };
         let b = Self {
             rx_buffer: a_to_b,
             tx_buffer: b_to_a,
-            connected,
+            connected: Arc::new(Mutex::new(true)),
         };
         (a, b)
     }
@@ -64,6 +66,38 @@ impl MockTransport {
     pub fn rx_available(&self) -> usize {
         self.rx_buffer.lock().unwrap().len()
     }
+
+    fn try_read(&self, buf: &mut [u8]) -> Option<usize> {
+        let mut rx = self.rx_buffer.lock().unwrap();
+        if rx.is_empty() {
+            return None;
+        }
+        let n = buf.len().min(rx.len());
+        for item in buf.iter_mut().take(n) {
+            *item = rx.pop_front().unwrap();
+        }
+        Some(n)
+    }
+}
+
+struct YieldNow(bool);
+
+impl Future for YieldNow {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.0 {
+            self.0 = false;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    }
+}
+
+async fn yield_now() {
+    YieldNow(true).await;
 }
 
 impl Default for MockTransport {
@@ -73,7 +107,7 @@ impl Default for MockTransport {
 }
 
 impl Transport for MockTransport {
-    fn send(&mut self, data: &[u8]) -> Result<()> {
+    async fn send(&mut self, data: &[u8]) -> Result<()> {
         if !self.is_connected() {
             return Err(Error::InvalidState("Transport not connected".into()));
         }
@@ -81,33 +115,27 @@ impl Transport for MockTransport {
         Ok(())
     }
 
-    fn receive(&mut self, buf: &mut [u8]) -> Result<usize> {
-        self.receive_timeout(buf, Duration::from_secs(5))
+    async fn receive(&mut self, buf: &mut [u8]) -> Result<usize> {
+        self.receive_timeout(buf, Duration::from_secs(5)).await
     }
 
-    fn receive_timeout(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize> {
-        let deadline = std::time::Instant::now() + timeout;
+    async fn receive_timeout(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize> {
+        let deadline = Instant::now() + timeout;
         loop {
             if !self.is_connected() {
                 return Err(Error::InvalidState("Transport not connected".into()));
             }
-            let mut rx = self.rx_buffer.lock().unwrap();
-            if !rx.is_empty() {
-                let n = buf.len().min(rx.len());
-                for item in buf.iter_mut().take(n) {
-                    *item = rx.pop_front().unwrap();
-                }
+            if let Some(n) = self.try_read(buf) {
                 return Ok(n);
             }
-            drop(rx);
-            if std::time::Instant::now() >= deadline {
+            if Instant::now() >= deadline {
                 return Err(Error::Timeout);
             }
-            std::thread::sleep(Duration::from_micros(100));
+            yield_now().await;
         }
     }
 
-    fn close(&mut self) -> Result<()> {
+    async fn close(&mut self) -> Result<()> {
         *self.connected.lock().unwrap() = false;
         Ok(())
     }
@@ -121,35 +149,37 @@ impl Transport for MockTransport {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_mock_transport() {
+    #[tokio::test]
+    async fn test_mock_transport() {
         let mut transport = MockTransport::new();
         transport.add_rx_data(b"hello");
         let mut buf = [0u8; 10];
-        let n = transport.receive(&mut buf).unwrap();
+        let n = transport.receive(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"hello");
-        transport.send(b"world").unwrap();
+        transport.send(b"world").await.unwrap();
         assert_eq!(transport.get_tx_data(), b"world");
     }
 
-    #[test]
-    fn test_mock_pair() {
+    #[tokio::test]
+    async fn test_mock_pair() {
         let (mut a, mut b) = MockTransport::pair();
-        a.send(b"from A").unwrap();
+        a.send(b"from A").await.unwrap();
         let mut buf = [0u8; 10];
-        let n = b.receive(&mut buf).unwrap();
+        let n = b.receive(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"from A");
-        b.send(b"from B").unwrap();
-        let n = a.receive(&mut buf).unwrap();
+        b.send(b"from B").await.unwrap();
+        let n = a.receive(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"from B");
     }
 
-    #[test]
-    fn test_timeout_on_empty() {
+    #[tokio::test]
+    async fn test_timeout_on_empty() {
         let mut transport = MockTransport::new();
         let mut buf = [0u8; 10];
         assert!(matches!(
-            transport.receive_timeout(&mut buf, Duration::from_millis(100)),
+            transport
+                .receive_timeout(&mut buf, Duration::from_millis(50))
+                .await,
             Err(Error::Timeout)
         ));
     }
