@@ -19,7 +19,7 @@
 //! ## Architecture
 //!
 //! - **Protocol Layer**: Message format, headers, and parameters
-//! - **Transport Layer**: Abstract async interface for different transports
+//! - **Transport Layer**: Abstract async interface with capability metadata for different transports
 //! - **Session Layer**: Fragment management, sequencing, flow control
 //! - **Connection Layer**: Master connection management
 //!
@@ -48,7 +48,7 @@ pub use connection::{ConnectionState, MasterConnection};
 pub use error::{Error, Result};
 pub use protocol::{Header, Message, Parameters, Status};
 pub use session::SequenceTracker;
-pub use transport::Transport;
+pub use transport::{Transport, TransportCapabilities};
 
 #[cfg(feature = "serial")]
 pub use transport::serial::SerialTransport;

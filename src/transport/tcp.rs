@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::transport::Transport;
+use crate::transport::{Transport, TransportCapabilities};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -88,6 +88,13 @@ impl Transport for TcpTransport {
     fn is_connected(&self) -> bool {
         self.stream.is_some()
     }
+
+    fn capabilities(&self) -> TransportCapabilities {
+        TransportCapabilities {
+            length_present: true,
+            fragment_max_size: 0,
+        }
+    }
 }
 
 impl Drop for TcpTransport {
@@ -127,6 +134,9 @@ mod tests {
 
         let mut transport = TcpTransport::connect(addr).await.unwrap();
         assert!(transport.is_connected());
+        let caps = transport.capabilities();
+        assert!(caps.length_present);
+        assert_eq!(caps.fragment_max_size, 0);
 
         let data = b"Hello, SMSP!";
         transport.send(data).await.unwrap();

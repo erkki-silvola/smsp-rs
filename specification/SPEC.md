@@ -311,6 +311,7 @@ Slave can send CANCEL when:
 - **IMPORTANT**: When `length_present=true`, `fragment_count` MUST be 1
   - This simplifies flow control when length is explicitly known
   - Every fragment is acknowledged immediately
+- When `length_present=false`, the parameter response sets `fragment_max_size=0` on the wire; the effective maximum fragment payload comes from the transport's `fragment_max_size` capability
 
 ### Reserved Bits
 - Must be set to 0 by sender

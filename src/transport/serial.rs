@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::transport::Transport;
+use crate::transport::{Transport, TransportCapabilities};
 use futures::future::{select, Either};
 use futures_timer::Delay;
 use serialport_stream::{new, AsyncReadExt, AsyncWriteExt, SerialPortStream};
@@ -77,5 +77,12 @@ impl Transport for SerialTransport {
 
     fn is_connected(&self) -> bool {
         self.stream.is_some()
+    }
+
+    fn capabilities(&self) -> TransportCapabilities {
+        TransportCapabilities {
+            length_present: true,
+            fragment_max_size: 0,
+        }
     }
 }

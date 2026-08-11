@@ -76,6 +76,18 @@ impl<T: Transport> MasterConnection<T> {
                 parameters.protocol_version
             )));
         }
+        let caps = self.transport.capabilities();
+        if caps.length_present && !parameters.length_present {
+            return Err(Error::InvalidParameters(
+                "Transport requires length field but device negotiated length_present=false".into(),
+            ));
+        }
+        if !caps.length_present && parameters.length_present {
+            return Err(Error::InvalidParameters(
+                "Transport operates in no-length mode but device negotiated length_present=true"
+                    .into(),
+            ));
+        }
 
         self.parameters = Some(parameters.clone());
         self.state = ConnectionState::Ready;
@@ -97,10 +109,15 @@ impl<T: Transport> MasterConnection<T> {
         let params = self.params()?;
         let length_present = params.length_present;
         let fragment_count = params.fragment_count;
-        let max_size = params.fragment_max_size as usize;
+        let caps = self.transport.capabilities();
+        let max_size = if length_present {
+            params.fragment_max_size as usize
+        } else {
+            caps.fragment_max_size as usize
+        };
+        let timeout = params.timeout;
 
         self.sequence.reset();
-        let timeout = self.params()?.timeout;
         io::send_fragments(
             &mut self.transport,
             data,
@@ -111,7 +128,14 @@ impl<T: Transport> MasterConnection<T> {
             &mut self.sequence,
         )
         .await?;
-        io::receive_fragments(&mut self.transport, length_present, fragment_count, timeout).await
+        io::receive_fragments(
+            &mut self.transport,
+            length_present,
+            fragment_count,
+            max_size,
+            timeout,
+        )
+        .await
     }
 
     /// Close the connection.
@@ -155,6 +179,17 @@ mod tests {
         let negotiated = master.initialize().await.unwrap();
         assert_eq!(negotiated, params);
         assert_eq!(master.state(), ConnectionState::Ready);
+    }
+
+    #[tokio::test]
+    async fn test_master_rejects_no_length_on_length_required_transport() {
+        let mut transport = MockTransport::new();
+        transport.add_rx_data(b"1,0,20000,2,0\n");
+        let mut master = MasterConnection::new(transport);
+        assert!(matches!(
+            master.initialize().await,
+            Err(Error::InvalidParameters(_))
+        ));
     }
 
     #[tokio::test]

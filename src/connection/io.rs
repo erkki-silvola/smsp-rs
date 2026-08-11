@@ -26,6 +26,7 @@ pub(crate) async fn read_exact<T: Transport>(
 pub(crate) async fn read_message<T: Transport>(
     transport: &mut T,
     length_present: bool,
+    max_size: usize,
     timeout: Duration,
 ) -> Result<Message> {
     if length_present {
@@ -42,8 +43,10 @@ pub(crate) async fn read_message<T: Transport>(
         let mut hdr_byte = [0u8; 1];
         read_exact(transport, &mut hdr_byte, timeout).await?;
         let header = Header::from_bytes(&hdr_byte)?;
-        let mut buf = [0u8; 65535];
-        let n = transport.receive_timeout(&mut buf, timeout).await?;
+        let mut buf = vec![0u8; max_size];
+        let n = transport
+            .receive_no_length_payload(&mut buf, timeout)
+            .await?;
         let payload = Bytes::copy_from_slice(&buf[..n]);
         Message::new(header, payload)
     }
@@ -52,9 +55,10 @@ pub(crate) async fn read_message<T: Transport>(
 pub(crate) async fn wait_ack<T: Transport>(
     transport: &mut T,
     length_present: bool,
+    max_size: usize,
     timeout: Duration,
 ) -> Result<()> {
-    let msg = read_message(transport, length_present, timeout).await?;
+    let msg = read_message(transport, length_present, max_size, timeout).await?;
     if msg.is_cancel() {
         return Err(Error::Cancelled(
             String::from_utf8_lossy(&msg.payload).into(),
@@ -78,14 +82,10 @@ pub(crate) async fn send_fragments<T: Transport>(
     timeout: Duration,
     sequence: &mut SequenceTracker,
 ) -> Result<()> {
-    let chunks: Vec<&[u8]> = if length_present {
-        if data.is_empty() {
-            vec![&[] as &[u8]]
-        } else {
-            data.chunks(max_size).collect()
-        }
+    let chunks: Vec<&[u8]> = if data.is_empty() {
+        vec![&[] as &[u8]]
     } else {
-        vec![data]
+        data.chunks(max_size).collect()
     };
     let total = chunks.len();
     let mut sent_since_ack: u8 = 0;
@@ -103,7 +103,7 @@ pub(crate) async fn send_fragments<T: Transport>(
         }
         sent_since_ack += 1;
         if sent_since_ack >= fragment_count {
-            wait_ack(transport, length_present, timeout).await?;
+            wait_ack(transport, length_present, max_size, timeout).await?;
             sent_since_ack = 0;
         }
     }
@@ -114,13 +114,14 @@ pub(crate) async fn receive_fragments<T: Transport>(
     transport: &mut T,
     length_present: bool,
     fragment_count: u8,
+    max_size: usize,
     timeout: Duration,
 ) -> Result<Bytes> {
     let mut seq = SequenceTracker::new();
     let mut response = BytesMut::new();
     let mut received_since_ack: u8 = 0;
     loop {
-        let msg = read_message(transport, length_present, timeout).await?;
+        let msg = read_message(transport, length_present, max_size, timeout).await?;
         if msg.is_cancel() {
             return Err(Error::Cancelled(
                 String::from_utf8_lossy(&msg.payload).into(),

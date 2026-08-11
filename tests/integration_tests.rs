@@ -1,6 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use smsp_rs::{
-    Error, MasterConnection, Message, MockTransport, Parameters, Result, SequenceTracker, Transport,
+    Error, MasterConnection, Message, MockTransport, Parameters, Result, SequenceTracker,
+    Transport, TransportCapabilities,
 };
 use std::time::Duration;
 
@@ -25,6 +26,7 @@ async fn read_exact(
 async fn read_message(
     transport: &mut MockTransport,
     length_present: bool,
+    max_size: usize,
     timeout: Duration,
 ) -> Result<Message> {
     if length_present {
@@ -41,8 +43,10 @@ async fn read_message(
         let mut hdr_byte = [0u8; 1];
         read_exact(transport, &mut hdr_byte, timeout).await?;
         let header = smsp_rs::Header::from_bytes(&hdr_byte)?;
-        let mut buf = [0u8; 65535];
-        let n = transport.receive_timeout(&mut buf, timeout).await?;
+        let mut buf = vec![0u8; max_size];
+        let n = transport
+            .receive_no_length_payload(&mut buf, timeout)
+            .await?;
         let payload = Bytes::copy_from_slice(&buf[..n]);
         Message::new(header, payload)
     }
@@ -68,11 +72,16 @@ async fn slave_receive_request(
     transport: &mut MockTransport,
     params: &Parameters,
 ) -> Result<Bytes> {
+    let max_size = if params.length_present {
+        params.fragment_max_size as usize
+    } else {
+        transport.capabilities().fragment_max_size as usize
+    };
     let mut seq = SequenceTracker::new();
     let mut request = BytesMut::new();
     let mut received_since_ack: u8 = 0;
     loop {
-        let msg = read_message(transport, params.length_present, params.timeout).await?;
+        let msg = read_message(transport, params.length_present, max_size, params.timeout).await?;
         if msg.is_cancel() {
             return Err(Error::Cancelled(
                 String::from_utf8_lossy(&msg.payload).into(),
@@ -103,16 +112,16 @@ async fn slave_send_response(
     params: &Parameters,
     data: &[u8],
 ) -> Result<()> {
-    let mut sequence = SequenceTracker::new();
-    let max_size = params.fragment_max_size as usize;
-    let chunks: Vec<&[u8]> = if params.length_present {
-        if data.is_empty() {
-            vec![&[] as &[u8]]
-        } else {
-            data.chunks(max_size).collect()
-        }
+    let max_size = if params.length_present {
+        params.fragment_max_size as usize
     } else {
-        vec![data]
+        transport.capabilities().fragment_max_size as usize
+    };
+    let mut sequence = SequenceTracker::new();
+    let chunks: Vec<&[u8]> = if data.is_empty() {
+        vec![&[] as &[u8]]
+    } else {
+        data.chunks(max_size).collect()
     };
     let total = chunks.len();
     let mut sent_since_ack: u8 = 0;
@@ -130,7 +139,8 @@ async fn slave_send_response(
         }
         sent_since_ack += 1;
         if sent_since_ack >= params.fragment_count {
-            let ack = read_message(transport, params.length_present, params.timeout).await?;
+            let ack =
+                read_message(transport, params.length_present, max_size, params.timeout).await?;
             if !ack.is_ack() {
                 return Err(Error::Protocol("Expected ACK".into()));
             }
@@ -253,6 +263,34 @@ async fn test_message_types() -> Result<()> {
     let last = Message::last(2, true, Bytes::from("final"))?;
     assert!(last.is_last());
     assert!(!last.is_more());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_no_length_fragmented_request_response() -> Result<()> {
+    let caps = TransportCapabilities {
+        length_present: false,
+        fragment_max_size: 64,
+    };
+    let (master_transport, slave_transport) = MockTransport::pair();
+    let master_transport = master_transport.with_capabilities(caps);
+    let slave_transport = slave_transport.with_capabilities(caps);
+    let params = Parameters::from_response("1,0,20000,2,0\n")?;
+    let slave_handle = tokio::spawn(run_echo_slave(slave_transport, params));
+
+    let mut master = MasterConnection::new(master_transport);
+    let negotiated = master.initialize().await?;
+    assert!(!negotiated.length_present);
+    assert_eq!(negotiated.fragment_count, 2);
+
+    let large_data = vec![0xBB; 200];
+    let response = master.request(&large_data).await?;
+    let mut expected = b"Echo: ".to_vec();
+    expected.extend_from_slice(&large_data);
+    assert_eq!(response.as_ref(), &expected[..]);
+    master.close().await?;
+
+    slave_handle.await.unwrap()?;
     Ok(())
 }
 

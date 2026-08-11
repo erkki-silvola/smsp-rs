@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::transport::Transport;
+use crate::transport::{Transport, TransportCapabilities};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -11,21 +11,36 @@ use std::time::{Duration, Instant};
 ///
 /// Supports both standalone mode (`new()`) and paired bidirectional
 /// mode (`pair()`) where data sent on one end is received by the other.
+/// Each [`Transport::send`] delivers one discrete frame to the peer, matching
+/// no-length transport message boundaries.
 #[derive(Clone)]
 pub struct MockTransport {
-    rx_buffer: Arc<Mutex<VecDeque<u8>>>,
-    tx_buffer: Arc<Mutex<VecDeque<u8>>>,
+    rx_frames: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    tx_peer: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    tx_log: Arc<Mutex<VecDeque<u8>>>,
     connected: Arc<Mutex<bool>>,
+    capabilities: TransportCapabilities,
 }
 
 impl MockTransport {
     /// Create a standalone mock transport.
     pub fn new() -> Self {
         Self {
-            rx_buffer: Arc::new(Mutex::new(VecDeque::new())),
-            tx_buffer: Arc::new(Mutex::new(VecDeque::new())),
+            rx_frames: Arc::new(Mutex::new(VecDeque::new())),
+            tx_peer: Arc::new(Mutex::new(VecDeque::new())),
+            tx_log: Arc::new(Mutex::new(VecDeque::new())),
             connected: Arc::new(Mutex::new(true)),
+            capabilities: TransportCapabilities {
+                length_present: true,
+                fragment_max_size: 256,
+            },
         }
+    }
+
+    /// Set transport capabilities for testing no-length mode or custom fragment sizes.
+    pub fn with_capabilities(mut self, capabilities: TransportCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
     }
 
     /// Create a pair of connected mock transports.
@@ -34,49 +49,67 @@ impl MockTransport {
     pub fn pair() -> (Self, Self) {
         let a_to_b = Arc::new(Mutex::new(VecDeque::new()));
         let b_to_a = Arc::new(Mutex::new(VecDeque::new()));
+        let default_caps = TransportCapabilities {
+            length_present: true,
+            fragment_max_size: 256,
+        };
         let a = Self {
-            rx_buffer: b_to_a.clone(),
-            tx_buffer: a_to_b.clone(),
+            rx_frames: b_to_a.clone(),
+            tx_peer: a_to_b.clone(),
+            tx_log: Arc::new(Mutex::new(VecDeque::new())),
             connected: Arc::new(Mutex::new(true)),
+            capabilities: default_caps,
         };
         let b = Self {
-            rx_buffer: a_to_b,
-            tx_buffer: b_to_a,
+            rx_frames: a_to_b,
+            tx_peer: b_to_a,
+            tx_log: Arc::new(Mutex::new(VecDeque::new())),
             connected: Arc::new(Mutex::new(true)),
+            capabilities: default_caps,
         };
         (a, b)
     }
 
-    /// Add data to the receive buffer.
+    /// Add data to the receive buffer as one frame.
     pub fn add_rx_data(&mut self, data: &[u8]) {
-        self.rx_buffer.lock().unwrap().extend(data.iter());
+        self.rx_frames.lock().unwrap().push_back(data.to_vec());
     }
 
     /// Get all data that was transmitted.
     pub fn get_tx_data(&self) -> Vec<u8> {
-        self.tx_buffer.lock().unwrap().iter().copied().collect()
+        self.tx_log.lock().unwrap().iter().copied().collect()
     }
 
     /// Clear transmitted data.
     pub fn clear_tx_data(&mut self) {
-        self.tx_buffer.lock().unwrap().clear();
+        self.tx_log.lock().unwrap().clear();
     }
 
     /// Get number of bytes available to receive.
     pub fn rx_available(&self) -> usize {
-        self.rx_buffer.lock().unwrap().len()
+        self.rx_frames.lock().unwrap().iter().map(Vec::len).sum()
+    }
+
+    fn rx_frame_remaining(&self) -> usize {
+        self.rx_frames.lock().unwrap().front().map_or(0, Vec::len)
     }
 
     fn try_read(&self, buf: &mut [u8]) -> Option<usize> {
-        let mut rx = self.rx_buffer.lock().unwrap();
-        if rx.is_empty() {
-            return None;
+        let mut frames = self.rx_frames.lock().unwrap();
+        loop {
+            let front = frames.front_mut()?;
+            if front.is_empty() {
+                frames.pop_front();
+                continue;
+            }
+            let n = buf.len().min(front.len());
+            buf[..n].copy_from_slice(&front[..n]);
+            front.drain(..n);
+            if front.is_empty() {
+                frames.pop_front();
+            }
+            return Some(n);
         }
-        let n = buf.len().min(rx.len());
-        for item in buf.iter_mut().take(n) {
-            *item = rx.pop_front().unwrap();
-        }
-        Some(n)
     }
 }
 
@@ -111,7 +144,8 @@ impl Transport for MockTransport {
         if !self.is_connected() {
             return Err(Error::InvalidState("Transport not connected".into()));
         }
-        self.tx_buffer.lock().unwrap().extend(data.iter());
+        self.tx_log.lock().unwrap().extend(data.iter());
+        self.tx_peer.lock().unwrap().push_back(data.to_vec());
         Ok(())
     }
 
@@ -135,6 +169,17 @@ impl Transport for MockTransport {
         }
     }
 
+    async fn receive_no_length_payload(
+        &mut self,
+        buf: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize> {
+        if self.rx_frame_remaining() == 0 {
+            return Ok(0);
+        }
+        self.receive_timeout(buf, timeout).await
+    }
+
     async fn close(&mut self) -> Result<()> {
         *self.connected.lock().unwrap() = false;
         Ok(())
@@ -142,6 +187,10 @@ impl Transport for MockTransport {
 
     fn is_connected(&self) -> bool {
         *self.connected.lock().unwrap()
+    }
+
+    fn capabilities(&self) -> TransportCapabilities {
+        self.capabilities
     }
 }
 
@@ -182,5 +231,19 @@ mod tests {
                 .await,
             Err(Error::Timeout)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_no_length_empty_payload_after_header() {
+        let mut transport = MockTransport::new();
+        transport.add_rx_data(&[0x00]);
+        let mut hdr = [0u8; 1];
+        transport.receive(&mut hdr).await.unwrap();
+        let mut buf = [0u8; 64];
+        let n = transport
+            .receive_no_length_payload(&mut buf, Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }
