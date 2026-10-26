@@ -16,6 +16,10 @@ futures = { version = "0.3", features = ["std"] }
 futures-timer = "3"
 tokio = { version = "1", features = ["net", "io-util", "rt", "time"], optional = true }
 serialport-stream = { version = "0.3.2", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+ciborium = { version = "0.2", optional = true }
+sha2 = { version = "0.10", optional = true }
+hex = { version = "0.4", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
@@ -24,6 +28,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 default = ["tcp"]
 tcp = ["dep:tokio"]
 serial = ["dep:serialport-stream"]
+mcuboot-example = ["dep:serde", "dep:ciborium", "dep:sha2", "dep:hex", "serial"]
 
 [[example]]
 name = "tcp_master"
@@ -32,3 +37,7 @@ required-features = ["tcp"]
 [[example]]
 name = "serial_master"
 required-features = ["serial"]
+
+[[example]]
+name = "ncs_mcuboot"
+required-features = ["mcuboot-example"]
