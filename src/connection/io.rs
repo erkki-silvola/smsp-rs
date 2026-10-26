@@ -3,7 +3,29 @@ use crate::protocol::{Header, Message};
 use crate::session::SequenceTracker;
 use crate::transport::Transport;
 use bytes::{Bytes, BytesMut};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+pub(crate) async fn read_line<T: Transport>(
+    transport: &mut T,
+    buf: &mut [u8],
+    timeout: Duration,
+) -> Result<usize> {
+    let deadline = Instant::now() + timeout;
+    let mut len = 0;
+    while len < buf.len() {
+        let slice = &mut buf[len..len + 1];
+        let wait = deadline.saturating_duration_since(Instant::now());
+        if wait.is_zero() {
+            return Err(Error::Timeout);
+        }
+        let n = transport.receive_timeout(slice, wait).await?;
+        len += n;
+        if buf[len - 1] == b'\n' {
+            return Ok(len);
+        }
+    }
+    Err(Error::Protocol("Parameter response line too long".into()))
+}
 
 pub(crate) async fn read_exact<T: Transport>(
     transport: &mut T,

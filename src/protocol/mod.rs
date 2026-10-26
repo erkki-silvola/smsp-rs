@@ -4,4 +4,4 @@ pub mod parameters;
 
 pub use header::{Header, Status};
 pub use message::Message;
-pub use parameters::Parameters;
+pub use parameters::{Parameters, MAX_FRAGMENT_PAYLOAD};

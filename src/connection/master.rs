@@ -5,7 +5,7 @@ use crate::protocol::Parameters;
 use crate::session::SequenceTracker;
 use crate::transport::Transport;
 use bytes::Bytes;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Master (connection initiator) side of the SMSP protocol.
 ///
@@ -61,15 +61,20 @@ impl<T: Transport> MasterConnection<T> {
             .await?;
 
         let mut buf = [0u8; 256];
-        let n = self
-            .transport
-            .receive_timeout(&mut buf, Duration::from_secs(5))
-            .await?;
-
-        let response = std::str::from_utf8(&buf[..n])
-            .map_err(|_| Error::InvalidParameters("Response is not valid UTF-8".into()))?;
-
-        let parameters = Parameters::from_response(response)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let parameters = loop {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            if wait.is_zero() {
+                return Err(Error::Timeout);
+            }
+            let n = io::read_line(&mut self.transport, &mut buf, wait).await?;
+            let response = std::str::from_utf8(&buf[..n])
+                .map_err(|_| Error::InvalidParameters("Response is not valid UTF-8".into()))?;
+            if response.trim().is_empty() {
+                continue;
+            }
+            break Parameters::from_response(response)?;
+        };
         if parameters.protocol_version != 1 {
             return Err(Error::InvalidParameters(format!(
                 "Unsupported protocol version: {}",
@@ -110,11 +115,7 @@ impl<T: Transport> MasterConnection<T> {
         let length_present = params.length_present;
         let fragment_count = params.fragment_count;
         let caps = self.transport.capabilities();
-        let max_size = if length_present {
-            params.fragment_max_size as usize
-        } else {
-            caps.fragment_max_size as usize
-        };
+        let max_size = params.fragment_payload_limit(caps);
         let timeout = params.timeout;
 
         self.sequence.reset();
@@ -158,6 +159,13 @@ impl<T: Transport> MasterConnection<T> {
         self.parameters.as_ref()
     }
 
+    /// Max payload bytes per SMSP fragment before an ACK.
+    pub fn fragment_payload_limit(&self) -> Option<usize> {
+        self.parameters
+            .as_ref()
+            .map(|p| p.fragment_payload_limit(self.transport.capabilities()))
+    }
+
     fn params(&self) -> Result<Parameters> {
         self.parameters
             .clone()
@@ -179,6 +187,29 @@ mod tests {
         let negotiated = master.initialize().await.unwrap();
         assert_eq!(negotiated, params);
         assert_eq!(master.state(), ConnectionState::Ready);
+    }
+
+    #[tokio::test]
+    async fn test_master_initialization_skips_spurious_newlines() {
+        let mut transport = MockTransport::new();
+        let params = Parameters::default_slave();
+        transport.add_rx_data(b"\n\n");
+        transport.add_rx_data(params.to_response().as_bytes());
+        let mut master = MasterConnection::new(transport);
+        let negotiated = master.initialize().await.unwrap();
+        assert_eq!(negotiated, params);
+    }
+
+    #[tokio::test]
+    async fn test_master_initialization_params_byte_by_byte() {
+        let mut transport = MockTransport::new();
+        let params = Parameters::default_slave();
+        for byte in params.to_response().bytes() {
+            transport.add_rx_data(&[byte]);
+        }
+        let mut master = MasterConnection::new(transport);
+        let negotiated = master.initialize().await.unwrap();
+        assert_eq!(negotiated, params);
     }
 
     #[tokio::test]

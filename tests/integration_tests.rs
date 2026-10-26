@@ -68,15 +68,12 @@ async fn slave_wait_init(transport: &mut MockTransport, params: &Parameters) -> 
     Ok(())
 }
 
-async fn slave_receive_request(
+async fn slave_receive_request_with_sizes(
     transport: &mut MockTransport,
     params: &Parameters,
-) -> Result<Bytes> {
-    let max_size = if params.length_present {
-        params.fragment_max_size as usize
-    } else {
-        transport.capabilities().fragment_max_size as usize
-    };
+) -> Result<(Bytes, Vec<usize>)> {
+    let max_size = params.fragment_payload_limit(transport.capabilities());
+    let mut fragment_sizes = Vec::new();
     let mut seq = SequenceTracker::new();
     let mut request = BytesMut::new();
     let mut received_since_ack: u8 = 0;
@@ -94,9 +91,10 @@ async fn slave_receive_request(
             });
         }
         let is_last = msg.is_last();
+        fragment_sizes.push(msg.payload.len());
         request.extend_from_slice(&msg.payload);
         if is_last {
-            return Ok(request.freeze());
+            return Ok((request.freeze(), fragment_sizes));
         }
         received_since_ack += 1;
         if received_since_ack >= params.fragment_count {
@@ -107,16 +105,21 @@ async fn slave_receive_request(
     }
 }
 
+async fn slave_receive_request(
+    transport: &mut MockTransport,
+    params: &Parameters,
+) -> Result<Bytes> {
+    slave_receive_request_with_sizes(transport, params)
+        .await
+        .map(|(body, _)| body)
+}
+
 async fn slave_send_response(
     transport: &mut MockTransport,
     params: &Parameters,
     data: &[u8],
 ) -> Result<()> {
-    let max_size = if params.length_present {
-        params.fragment_max_size as usize
-    } else {
-        transport.capabilities().fragment_max_size as usize
-    };
+    let max_size = params.fragment_payload_limit(transport.capabilities());
     let mut sequence = SequenceTracker::new();
     let chunks: Vec<&[u8]> = if data.is_empty() {
         vec![&[] as &[u8]]
@@ -200,6 +203,32 @@ async fn test_fragmented_request_response() -> Result<()> {
     assert_eq!(response.as_ref(), &large_data[..]);
     master.close().await?;
 
+    slave_handle.await.unwrap()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_request_fragments_256_bytes_between_acks() -> Result<()> {
+    let (master_transport, mut slave_transport) = MockTransport::pair();
+    let params = Parameters::default_slave();
+    let slave_handle = tokio::spawn(async move {
+        slave_wait_init(&mut slave_transport, &params).await?;
+        let (request, sizes) =
+            slave_receive_request_with_sizes(&mut slave_transport, &params).await?;
+        assert_eq!(request.len(), 513);
+        assert_eq!(sizes, vec![256, 256, 1]);
+        slave_send_response(&mut slave_transport, &params, &request).await?;
+        slave_transport.close().await?;
+        Ok::<(), Error>(())
+    });
+
+    let mut master = MasterConnection::new(master_transport);
+    master.initialize().await?;
+    assert_eq!(master.fragment_payload_limit(), Some(256));
+    let payload = vec![0xBB; 513];
+    let response = master.request(&payload).await?;
+    assert_eq!(response.as_ref(), &payload[..]);
+    master.close().await?;
     slave_handle.await.unwrap()?;
     Ok(())
 }

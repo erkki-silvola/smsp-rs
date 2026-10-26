@@ -84,11 +84,7 @@ async fn slave_receive_request(
     transport: &mut MockTransport,
     params: &Parameters,
 ) -> Result<Bytes> {
-    let max_size = if params.length_present {
-        params.fragment_max_size as usize
-    } else {
-        transport.capabilities().fragment_max_size as usize
-    };
+    let max_size = params.fragment_payload_limit(transport.capabilities());
     let mut seq = SequenceTracker::new();
     let mut request = BytesMut::new();
     let mut received_since_ack: u8 = 0;
@@ -124,11 +120,7 @@ async fn slave_send_response(
     params: &Parameters,
     data: &[u8],
 ) -> Result<()> {
-    let max_size = if params.length_present {
-        params.fragment_max_size as usize
-    } else {
-        transport.capabilities().fragment_max_size as usize
-    };
+    let max_size = params.fragment_payload_limit(transport.capabilities());
     let mut sequence = SequenceTracker::new();
     let chunks: Vec<&[u8]> = if data.is_empty() {
         vec![&[] as &[u8]]
@@ -198,6 +190,28 @@ async fn mcuboot_rpc_list_images_roundtrip() -> Result<()> {
 }
 
 #[tokio::test]
+async fn mcuboot_rpc_upload_chunk_size_capped_to_fragment_max() -> Result<()> {
+    let firmware = vec![0xABu8; 400];
+    let dir = std::env::temp_dir().join(format!("smsp_mcuboot_cap_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("fw.bin");
+    std::fs::write(&path, &firmware).unwrap();
+
+    let (master_transport, slave_transport) = MockTransport::pair();
+    let device = MockDevice::new();
+    let slave = tokio::spawn(run_mcuboot_slave(slave_transport, device, 3));
+
+    let mut client = McubootClient::new(master_transport);
+    client.connect().await?;
+    assert_eq!(client.max_upload_chunk_size(), Some(256));
+    client.upload_image(&path, 0, 512).await?;
+    client.close().await?;
+    let _ = std::fs::remove_dir_all(&dir);
+    slave.await.unwrap()?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn mcuboot_rpc_upload_multichunk_and_list() -> Result<()> {
     let firmware = vec![0xCDu8; 700];
     let sha = hex::encode(Sha256::digest(&firmware));
@@ -207,8 +221,7 @@ async fn mcuboot_rpc_upload_multichunk_and_list() -> Result<()> {
     std::fs::write(&path, &firmware).unwrap();
 
     let (master_transport, slave_transport) = MockTransport::pair();
-    let mut device = MockDevice::new();
-    device.expect_upload(0, &sha, firmware.len() as u64);
+    let device = MockDevice::new();
     let slave = tokio::spawn(run_mcuboot_slave(slave_transport, device, 4));
 
     let mut client = McubootClient::new(master_transport);
@@ -244,6 +257,7 @@ async fn mcuboot_rpc_upload_rejects_bad_offset() -> Result<()> {
         &rpc::Request::UploadImage {
             slot: 0,
             sha256: "aa".repeat(32),
+            total: 128,
             offset: 64,
             length: 0,
         },

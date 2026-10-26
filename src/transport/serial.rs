@@ -2,7 +2,9 @@ use crate::error::{Error, Result};
 use crate::transport::{Transport, TransportCapabilities};
 use futures::future::{select, Either};
 use futures_timer::Delay;
-use serialport_stream::{new, AsyncReadExt, AsyncWriteExt, SerialPortStream};
+use serialport_stream::{
+    new, AsyncReadExt, AsyncWriteExt, ClearBuffer, FlowControl, SerialPortStream,
+};
 use std::time::Duration;
 
 /// Serial port transport implementation.
@@ -19,7 +21,12 @@ impl SerialTransport {
     ///
     /// Returns an error if the port cannot be opened.
     pub fn open(path: &str, baud_rate: u32) -> Result<Self> {
-        let stream = new(path, baud_rate).open().map_err(Error::Io)?;
+        let stream = new(path, baud_rate)
+            .flow_control(FlowControl::None)
+            .dtr_on_open(true)
+            .clear(ClearBuffer::All)
+            .open()
+            .map_err(Error::Io)?;
         Ok(Self {
             stream: Some(stream),
         })

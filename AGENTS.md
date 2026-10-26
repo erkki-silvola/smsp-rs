@@ -106,6 +106,9 @@ examples/
 ├── tcp_master.rs, serial_master.rs
 ├── ncs_mcuboot.rs      # feature mcuboot-example
 └── ncs/                # MCUboot RPC over SMSP (not lib API) — see examples/ncs/AGENTS.md
+
+firmware/
+└── nrf52840dk-smsp-mcuboot/   # NCS SMSP slave + MCUboot RPC — see firmware/.../AGENTS.md
 ```
 
 - `lib.rs` should primarily re-export; keep logic in submodules

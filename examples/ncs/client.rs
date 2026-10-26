@@ -15,8 +15,13 @@ impl<T: Transport> McubootClient<T> {
     }
 
     pub async fn connect(&mut self) -> Result<()> {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         self.master.initialize().await?;
         Ok(())
+    }
+
+    pub fn max_upload_chunk_size(&self) -> Option<usize> {
+        self.master.fragment_payload_limit()
     }
 
     pub async fn list_images(&mut self) -> Result<Vec<rpc::ImageInfo>> {
@@ -32,6 +37,15 @@ impl<T: Transport> McubootClient<T> {
     }
 
     pub async fn upload_image(&mut self, path: &Path, slot: u32, chunk_size: usize) -> Result<()> {
+        let max = self
+            .max_upload_chunk_size()
+            .ok_or_else(|| smsp_rs::Error::InvalidState("connect before upload_image".into()))?;
+        if chunk_size == 0 {
+            return Err(smsp_rs::Error::Protocol(
+                "chunk_size must be greater than 0".into(),
+            ));
+        }
+        let chunk_size = chunk_size.min(max);
         let firmware = std::fs::read(path).map_err(smsp_rs::Error::Io)?;
         let sha256 = hex::encode(Sha256::digest(&firmware));
         let total = firmware.len() as u64;
@@ -42,6 +56,7 @@ impl<T: Transport> McubootClient<T> {
             let req = Request::UploadImage {
                 slot,
                 sha256: sha256.clone(),
+                total,
                 offset,
                 length: chunk.len() as u64,
             };

@@ -1,0 +1,36 @@
+/ {
+	chosen {
+		ncs-smsp-uart = &uart0;
+	};
+};
+
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+};
+
+&uart0_default {
+	group1 {
+		psels = <NRF_PSEL(UART_TX, 0, 6)>,
+			<NRF_PSEL_DISCONNECTED(UART_RTS)>;
+	};
+	group2 {
+		psels = <NRF_PSEL(UART_RX, 0, 8)>,
+			<NRF_PSEL_DISCONNECTED(UART_CTS)>;
+		bias-pull-up;
+	};
+};
+
+&uart0_sleep {
+	group1 {
+		psels = <NRF_PSEL(UART_RX, 0, 8)>,
+			<NRF_PSEL_DISCONNECTED(UART_RTS)>,
+			<NRF_PSEL_DISCONNECTED(UART_CTS)>;
+		low-power-enable;
+	};
+	group2 {
+		psels = <NRF_PSEL(UART_TX, 0, 6)>;
+		low-power-enable;
+		bias-pull-up;
+	};
+};

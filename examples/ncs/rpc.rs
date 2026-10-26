@@ -8,6 +8,7 @@ pub enum Request {
     UploadImage {
         slot: u32,
         sha256: String,
+        total: u64,
         offset: u64,
         length: u64,
     },
@@ -121,6 +122,7 @@ mod tests {
         let req = Request::UploadImage {
             slot: 0,
             sha256: "ab".repeat(32),
+            total: 4,
             offset: 0,
             length: 4,
         };

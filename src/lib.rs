@@ -46,7 +46,7 @@ pub mod transport;
 
 pub use connection::{ConnectionState, MasterConnection};
 pub use error::{Error, Result};
-pub use protocol::{Header, Message, Parameters, Status};
+pub use protocol::{Header, Message, Parameters, Status, MAX_FRAGMENT_PAYLOAD};
 pub use session::SequenceTracker;
 pub use transport::{Transport, TransportCapabilities};
 

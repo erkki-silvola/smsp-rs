@@ -1,5 +1,9 @@
 use crate::error::{Error, Result};
+use crate::transport::TransportCapabilities;
 use std::time::Duration;
+
+/// Maximum SMSP payload bytes per fragment before an ACK (length-present and no-length modes).
+pub const MAX_FRAGMENT_PAYLOAD: u16 = 256;
 
 /// Connection parameters negotiated during initialization.
 ///
@@ -104,6 +108,16 @@ impl Parameters {
         })
     }
 
+    /// Payload limit per fragment before flow-control ACK, capped at [`MAX_FRAGMENT_PAYLOAD`].
+    pub fn fragment_payload_limit(&self, caps: TransportCapabilities) -> usize {
+        let raw = if self.length_present {
+            self.fragment_max_size
+        } else {
+            caps.fragment_max_size
+        };
+        usize::from(raw.min(MAX_FRAGMENT_PAYLOAD)).max(1)
+    }
+
     /// Format parameters as response string.
     pub fn to_response(&self) -> String {
         format!(
@@ -120,6 +134,7 @@ impl Parameters {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::TransportCapabilities;
 
     #[test]
     fn test_parse_length_present() {
@@ -137,6 +152,17 @@ mod tests {
         assert!(!params.length_present);
         assert_eq!(params.fragment_count, 2);
         assert_eq!(params.fragment_max_size, 0);
+    }
+
+    #[test]
+    fn fragment_payload_limit_capped_at_max() {
+        let mut params = Parameters::default_slave();
+        params.fragment_max_size = 512;
+        let caps = TransportCapabilities {
+            length_present: true,
+            fragment_max_size: 512,
+        };
+        assert_eq!(params.fragment_payload_limit(caps), 256);
     }
 
     #[test]
